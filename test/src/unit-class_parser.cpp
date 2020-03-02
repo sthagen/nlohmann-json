@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.6.1
+|  |  |__   |  |  | | | |  version 3.7.3
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -210,7 +210,7 @@ json parser_helper(const std::string& s)
     json j;
     json::parser(nlohmann::detail::input_adapter(s)).parse(true, j);
 
-    // if this line was reached, no exception ocurred
+    // if this line was reached, no exception occurred
     // -> check if result is the same without exceptions
     json j_nothrow;
     CHECK_NOTHROW(json::parser(nlohmann::detail::input_adapter(s), nullptr, false).parse(true, j_nothrow));
@@ -406,8 +406,9 @@ TEST_CASE("parser class")
                     // uses an iterator range.
                     std::string s = "\"1\"";
                     s[1] = '\0';
-                    CHECK_THROWS_AS(json::parse(s.begin(), s.end()), json::parse_error&);
-                    CHECK_THROWS_WITH(json::parse(s.begin(), s.end()), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0000 (NUL) must be escaped to \\u0000; last read: '\"<U+0000>'");
+                    json _;
+                    CHECK_THROWS_AS(_ = json::parse(s.begin(), s.end()), json::parse_error&);
+                    CHECK_THROWS_WITH(_ = json::parse(s.begin(), s.end()), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid string: control character U+0000 (NUL) must be escaped to \\u0000; last read: '\"<U+0000>'");
                 }
             }
 
@@ -1219,19 +1220,21 @@ TEST_CASE("parser class")
             }
         }
 
+        json _;
+
         // missing part of a surrogate pair
-        CHECK_THROWS_AS(json::parse("\"\\uD80C\""), json::parse_error&);
-        CHECK_THROWS_WITH(json::parse("\"\\uD80C\""),
+        CHECK_THROWS_AS(_ = json::parse("\"\\uD80C\""), json::parse_error&);
+        CHECK_THROWS_WITH(_ = json::parse("\"\\uD80C\""),
                           "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\"'");
         // invalid surrogate pair
-        CHECK_THROWS_AS(json::parse("\"\\uD80C\\uD80C\""), json::parse_error&);
-        CHECK_THROWS_AS(json::parse("\"\\uD80C\\u0000\""), json::parse_error&);
-        CHECK_THROWS_AS(json::parse("\"\\uD80C\\uFFFF\""), json::parse_error&);
-        CHECK_THROWS_WITH(json::parse("\"\\uD80C\\uD80C\""),
+        CHECK_THROWS_AS(_ = json::parse("\"\\uD80C\\uD80C\""), json::parse_error&);
+        CHECK_THROWS_AS(_ = json::parse("\"\\uD80C\\u0000\""), json::parse_error&);
+        CHECK_THROWS_AS(_ = json::parse("\"\\uD80C\\uFFFF\""), json::parse_error&);
+        CHECK_THROWS_WITH(_ = json::parse("\"\\uD80C\\uD80C\""),
                           "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\uD80C'");
-        CHECK_THROWS_WITH(json::parse("\"\\uD80C\\u0000\""),
+        CHECK_THROWS_WITH(_ = json::parse("\"\\uD80C\\u0000\""),
                           "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\u0000'");
-        CHECK_THROWS_WITH(json::parse("\"\\uD80C\\uFFFF\""),
+        CHECK_THROWS_WITH(_ = json::parse("\"\\uD80C\\uFFFF\""),
                           "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing value - invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF; last read: '\"\\uD80C\\uFFFF'");
     }
 
@@ -1423,7 +1426,7 @@ TEST_CASE("parser class")
 
     SECTION("tests found by mutate++")
     {
-        // test case to make sure no comma preceeds the first key
+        // test case to make sure no comma precedes the first key
         CHECK_THROWS_AS(parser_helper("{,\"key\": false}"), json::parse_error&);
         CHECK_THROWS_WITH(parser_helper("{,\"key\": false}"),
                           "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing object key - unexpected ','; expected string literal");
@@ -1679,12 +1682,13 @@ TEST_CASE("parser class")
 
             CHECK(json::parse("{\"foo\": true:", cb, false).is_discarded());
 
-            CHECK_THROWS_AS(json::parse("{\"foo\": true:", cb), json::parse_error&);
-            CHECK_THROWS_WITH(json::parse("{\"foo\": true:", cb),
+            json _;
+            CHECK_THROWS_AS(_ = json::parse("{\"foo\": true:", cb), json::parse_error&);
+            CHECK_THROWS_WITH(_ = json::parse("{\"foo\": true:", cb),
                               "[json.exception.parse_error.101] parse error at line 1, column 13: syntax error while parsing object - unexpected ':'; expected '}'");
 
-            CHECK_THROWS_AS(json::parse("1.18973e+4932", cb), json::out_of_range&);
-            CHECK_THROWS_WITH(json::parse("1.18973e+4932", cb),
+            CHECK_THROWS_AS(_ = json::parse("1.18973e+4932", cb), json::out_of_range&);
+            CHECK_THROWS_WITH(_ = json::parse("1.18973e+4932", cb),
                               "[json.exception.out_of_range.406] number overflow parsing '1.18973e+4932'");
         }
 

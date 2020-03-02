@@ -86,7 +86,7 @@ coverage:
 coverage-fast:
 	rm -fr build_coverage
 	mkdir build_coverage
-	cd build_coverage ; CXX=$(COMPILER_DIR)/g++ cmake .. -GNinja -DJSON_Coverage=ON -DJSON_MultipleHeaders=ON
+	cd build_coverage ; CXX=g++-9 cmake .. -GNinja -DJSON_Coverage=ON -DJSON_MultipleHeaders=ON
 	cd build_coverage ; ninja
 	cd build_coverage ; ctest -E '.*_default' -j10
 	cd build_coverage ; ninja fastcov_html
@@ -117,7 +117,7 @@ doctest:
 # -Wno-switch-enum -Wno-covered-switch-default: pedantic/contradicting warnings about switches
 # -Wno-weak-vtables: exception class is defined inline, but has virtual method
 pedantic_clang:
-	$(MAKE) json_unit CXX=$(COMPILER_DIR)/clang++ CXXFLAGS=" \
+	$(MAKE) json_unit CXX=c++ CXXFLAGS=" \
 		-std=c++11 -Wno-c++98-compat -Wno-c++98-compat-pedantic \
 		-Werror \
 		-Weverything \
@@ -134,7 +134,7 @@ pedantic_clang:
 
 # calling GCC with most warnings
 pedantic_gcc:
-	$(MAKE) json_unit CXX=$(COMPILER_DIR)/g++ CXXFLAGS=" \
+	$(MAKE) json_unit CXX=/usr/local/bin/g++-9 CXXFLAGS=" \
 		-std=c++11 \
 		-Waddress \
 		-Waddress-of-packed-member \
@@ -435,7 +435,7 @@ fuzzing-stop:
 # call cppcheck <http://cppcheck.sourceforge.net>
 # Note: this target is called by Travis
 cppcheck:
-	cppcheck --enable=warning --inline-suppr --inconclusive --force --std=c++11 $(SRCS) --error-exitcode=1
+	cppcheck --enable=warning --inline-suppr --inconclusive --force --std=c++11 $(AMALGAMATED_FILE) --error-exitcode=1
 
 # call Clang Static Analyzer <https://clang-analyzer.llvm.org>
 clang_analyze:
@@ -457,7 +457,7 @@ cpplint:
 
 # call Clang-Tidy <https://clang.llvm.org/extra/clang-tidy/>
 clang_tidy:
-	$(COMPILER_DIR)/clang-tidy $(SRCS) -- -Iinclude -std=c++11
+	$(COMPILER_DIR)/clang-tidy $(AMALGAMATED_FILE) -- -Iinclude -std=c++11
 
 # call PVS-Studio Analyzer <https://www.viva64.com/en/pvs-studio/>
 pvs_studio:
@@ -588,13 +588,13 @@ ChangeLog.md:
 # Release files
 ##########################################################################
 
-# Create the files for a release and add signatures and hashes. We use `--no-extra` to make the resulting ZIP file
+# Create the files for a release and add signatures and hashes. We use `-X` to make the resulting ZIP file
 # reproducible, see <https://content.pivotal.io/blog/barriers-to-deterministic-reproducible-zip-files>.
 
 release:
 	rm -fr release_files
 	mkdir release_files
-	zip -9 --recurse-paths --no-extra include.zip $(SRCS)
+	zip -9 --recurse-paths -X include.zip $(SRCS) $(AMALGAMATED_FILE) meson.build
 	gpg --armor --detach-sig include.zip
 	mv include.zip include.zip.asc release_files
 	gpg --armor --detach-sig $(AMALGAMATED_FILE)
@@ -616,3 +616,14 @@ clean:
 	rm -fr build_coverage build_benchmarks fuzz-testing clang_analyze_build pvs_studio_build infer_build clang_sanitize_build cmake_build
 	$(MAKE) clean -Cdoc
 	$(MAKE) clean -Ctest
+
+##########################################################################
+# Thirdparty code
+##########################################################################
+
+update_hedley:
+	rm -f include/nlohmann/thirdparty/hedley/hedley.hpp include/nlohmann/thirdparty/hedley/hedley_undef.hpp
+	curl https://raw.githubusercontent.com/nemequ/hedley/master/hedley.h -o include/nlohmann/thirdparty/hedley/hedley.hpp
+	gsed -i 's/HEDLEY_/JSON_HEDLEY_/g' include/nlohmann/thirdparty/hedley/hedley.hpp
+	grep "[[:blank:]]*#[[:blank:]]*undef" include/nlohmann/thirdparty/hedley/hedley.hpp | grep -v "__" | sort | uniq | gsed 's/ //g' | gsed 's/undef/undef /g' > include/nlohmann/thirdparty/hedley/hedley_undef.hpp
+	$(MAKE) amalgamate

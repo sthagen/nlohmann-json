@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.6.1
+|  |  |__   |  |  | | | |  version 3.7.3
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -36,7 +36,7 @@ using nlohmann::json;
 
 TEST_CASE("compliance tests from json.org")
 {
-    // test cases are from http://json.org/JSON_checker/
+    // test cases are from https://json.org/JSON_checker/
 
     SECTION("expected failures")
     {
@@ -79,7 +79,8 @@ TEST_CASE("compliance tests from json.org")
         {
             CAPTURE(filename)
             std::ifstream f(filename);
-            CHECK_THROWS_AS(json::parse(f), json::parse_error&);
+            json _;
+            CHECK_THROWS_AS(_ = json::parse(f), json::parse_error&);
         }
     }
 
@@ -348,7 +349,7 @@ TEST_CASE("test suite from json-test-suite")
 
 TEST_CASE("json.org examples")
 {
-    // here, we list all JSON values from http://json.org/example
+    // here, we list all JSON values from https://json.org/example
 
     SECTION("1.json")
     {
@@ -387,36 +388,36 @@ TEST_CASE("json.org examples")
     SECTION("FILE 1.json")
     {
         std::unique_ptr<std::FILE, decltype(&std::fclose)> f(std::fopen("test/data/json.org/1.json", "r"), &std::fclose);
-        json j;
-        CHECK_NOTHROW(j.parse(f.get()));
+        json _;
+        CHECK_NOTHROW(_ = json::parse(f.get()));
     }
 
     SECTION("FILE 2.json")
     {
         std::unique_ptr<std::FILE, decltype(&std::fclose)> f(std::fopen("test/data/json.org/2.json", "r"), &std::fclose);
-        json j;
-        CHECK_NOTHROW(j.parse(f.get()));
+        json _;
+        CHECK_NOTHROW(_ = json::parse(f.get()));
     }
 
     SECTION("FILE 3.json")
     {
         std::unique_ptr<std::FILE, decltype(&std::fclose)> f(std::fopen("test/data/json.org/3.json", "r"), &std::fclose);
-        json j;
-        CHECK_NOTHROW(j.parse(f.get()));
+        json _;
+        CHECK_NOTHROW(_ = json::parse(f.get()));
     }
 
     SECTION("FILE 4.json")
     {
         std::unique_ptr<std::FILE, decltype(&std::fclose)> f(std::fopen("test/data/json.org/4.json", "r"), &std::fclose);
-        json j;
-        CHECK_NOTHROW(j.parse(f.get()));
+        json _;
+        CHECK_NOTHROW(_ = json::parse(f.get()));
     }
 
     SECTION("FILE 5.json")
     {
         std::unique_ptr<std::FILE, decltype(&std::fclose)> f(std::fopen("test/data/json.org/5.json", "r"), &std::fclose);
-        json j;
-        CHECK_NOTHROW(j.parse(f.get()));
+        json _;
+        CHECK_NOTHROW(_ = json::parse(f.get()));
     }
 }
 
@@ -810,7 +811,8 @@ TEST_CASE("nst's JSONTestSuite")
             {
                 CAPTURE(filename)
                 std::ifstream f(filename);
-                CHECK_THROWS_AS(json::parse(f), json::parse_error&);
+                json _;
+                CHECK_THROWS_AS(_ = json::parse(f), json::parse_error&);
             }
         }
 
@@ -1027,7 +1029,8 @@ TEST_CASE("nst's JSONTestSuite (2)")
             {
                 CAPTURE(filename)
                 std::ifstream f(filename);
-                CHECK_NOTHROW(json::parse(f));
+                json _;
+                CHECK_NOTHROW(_ = json::parse(f));
                 std::ifstream f2(filename);
                 CHECK(json::accept(f2));
             }
@@ -1228,7 +1231,8 @@ TEST_CASE("nst's JSONTestSuite (2)")
             {
                 CAPTURE(filename)
                 std::ifstream f(filename);
-                CHECK_THROWS_AS(json::parse(f), json::parse_error&);
+                json _;
+                CHECK_THROWS_AS(_ = json::parse(f), json::parse_error&);
                 std::ifstream f2(filename);
                 CHECK(not json::accept(f2));
             }
@@ -1293,7 +1297,8 @@ TEST_CASE("nst's JSONTestSuite (2)")
             {
                 CAPTURE(filename)
                 std::ifstream f(filename);
-                CHECK_NOTHROW(json::parse(f));
+                json _;
+                CHECK_NOTHROW(_ = json::parse(f));
                 std::ifstream f2(filename);
                 CHECK(json::accept(f2));
             }
@@ -1343,7 +1348,8 @@ TEST_CASE("nst's JSONTestSuite (2)")
             {
                 CAPTURE(filename)
                 std::ifstream f(filename);
-                CHECK_THROWS_AS(json::parse(f), json::exception&); // could be parse_error or out_of_range
+                json _;
+                CHECK_THROWS_AS(_ = json::parse(f), json::exception&); // could be parse_error or out_of_range
                 std::ifstream f2(filename);
                 CHECK(not json::accept(f2));
             }
@@ -1355,7 +1361,7 @@ namespace
 {
 std::string trim(const std::string& str);
 
-// from http://stackoverflow.com/a/25829178/266378
+// from https://stackoverflow.com/a/25829178/266378
 std::string trim(const std::string& str)
 {
     size_t first = str.find_first_not_of(' ');
