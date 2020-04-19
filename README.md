@@ -8,7 +8,7 @@
 [![Codacy Badge](https://api.codacy.com/project/badge/Grade/f3732b3327e34358a0e9d1fe9f661f08)](https://www.codacy.com/app/nlohmann/json?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=nlohmann/json&amp;utm_campaign=Badge_Grade)
 [![Language grade: C/C++](https://img.shields.io/lgtm/grade/cpp/g/nlohmann/json.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/nlohmann/json/context:cpp)
 [![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/json.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:json)
-[![Try online](https://img.shields.io/badge/try-online-blue.svg)](https://wandbox.org/permlink/TarF5pPn9NtHQjhf)
+[![Try online](https://img.shields.io/badge/try-online-blue.svg)](https://wandbox.org/permlink/3lCHrFUZANONKv7a)
 [![Documentation](https://img.shields.io/badge/docs-doxygen-blue.svg)](http://nlohmann.github.io/json)
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/nlohmann/json/master/LICENSE.MIT)
 [![GitHub Releases](https://img.shields.io/github/release/nlohmann/json.svg)](https://github.com/nlohmann/json/releases)
@@ -70,6 +70,7 @@ You can sponsor this library at [GitHub Sponsors](https://github.com/sponsors/nl
 
 - [Michael Hartmann](https://github.com/reFX-Mike)
 - [Stefan Hagen](https://github.com/sthagen)
+- [Steve Sperandeo](https://github.com/homer6)
 
 Thanks everyone!
 
@@ -194,6 +195,8 @@ If you are using [MSYS2](http://www.msys2.org/), your can use the [mingw-w64-nlo
 
 If you are using [`build2`](https://build2.org), you can use the [`nlohmann-json`](https://cppget.org/nlohmann-json) package from the public repository http://cppget.org or directly from the [package's sources repository](https://github.com/build2-packaging/nlohmann-json). In your project's `manifest` file, just add `depends: nlohmann-json` (probably with some [version constraints](https://build2.org/build2-toolchain/doc/build2-toolchain-intro.xhtml#guide-add-remove-deps)). If you are not familiar with using dependencies in `build2`, [please read this introduction](https://build2.org/build2-toolchain/doc/build2-toolchain-intro.xhtml).
 Please file issues [here](https://github.com/build2-packaging/nlohmann-json) if you experience problems with the packages.
+
+If you are using [`wsjcpp`](http://wsjcpp.org), you can use the command `wsjcpp install "https://github.com/nlohmann/json:develop"` to get the latest version. Note you can change the branch ":develop" to an existing tag or another branch.
 
 ## Examples
 
@@ -1072,10 +1075,6 @@ The following compilers are currently used in continuous integration at [Travis]
 | Clang 5.0.2           | Ubuntu 14.04.1 LTS           | clang version 5.0.2-svn328729-1~exp1~20180509123505.100 (branches/release_50) |
 | Clang 6.0.1           | Ubuntu 14.04.1 LTS           | clang version 6.0.1-svn334776-1~exp1~20180726133705.85 (branches/release_60) |
 | Clang 7.0.1           | Ubuntu 14.04.1 LTS           | clang version 7.0.1-svn348686-1~exp1~20181213084532.54 (branches/release_70) |
-| Clang Xcode 8.3       | OSX 10.11.6                  | Apple LLVM version 8.1.0 (clang-802.0.38) |
-| Clang Xcode 9.0       | OSX 10.12.6                  | Apple LLVM version 9.0.0 (clang-900.0.37) |
-| Clang Xcode 9.1       | OSX 10.12.6                  | Apple LLVM version 9.0.0 (clang-900.0.38) |
-| Clang Xcode 9.2       | OSX 10.13.3                  | Apple LLVM version 9.1.0 (clang-902.0.39.1) |
 | Clang Xcode 9.3       | OSX 10.13.3                  | Apple LLVM version 9.1.0 (clang-902.0.39.2) |
 | Clang Xcode 10.0      | OSX 10.13.3                  | Apple LLVM version 10.0.0 (clang-1000.11.45.2) |
 | Clang Xcode 10.1      | OSX 10.13.3                  | Apple LLVM version 10.0.0 (clang-1000.11.45.5) |
