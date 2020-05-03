@@ -8201,13 +8201,13 @@ class lexer
                                     }
                                     else
                                     {
-                                        error_message = "invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF";
+                                        error_message = "invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF";
                                         return token_type::parse_error;
                                     }
                                 }
                                 else
                                 {
-                                    error_message = "invalid string: surrogate U+DC00..U+DFFF must be followed by U+DC00..U+DFFF";
+                                    error_message = "invalid string: surrogate U+D800..U+DBFF must be followed by U+DC00..U+DFFF";
                                     return token_type::parse_error;
                                 }
                             }
@@ -11487,6 +11487,27 @@ class json_pointer
                         // "-" always fails the range check
                         return false;
                     }
+                    if (JSON_HEDLEY_UNLIKELY(reference_token.size() == 1 and not ("0" <= reference_token and reference_token <= "9")))
+                    {
+                        // invalid char
+                        return false;
+                    }
+                    if (JSON_HEDLEY_UNLIKELY(reference_token.size() > 1))
+                    {
+                        if (JSON_HEDLEY_UNLIKELY(not ('1' <= reference_token[0] and reference_token[0] <= '9')))
+                        {
+                            // first char should be between '1' and '9'
+                            return false;
+                        }
+                        for (std::size_t i = 1; i < reference_token.size(); i++)
+                        {
+                            if (JSON_HEDLEY_UNLIKELY(not ('0' <= reference_token[i] and reference_token[i] <= '9')))
+                            {
+                                // other char should be between '0' and '9'
+                                return false;
+                            }
+                        }
+                    }
 
                     const auto idx = static_cast<size_type>(array_index(reference_token));
                     if (idx >= ptr->size())
@@ -14760,7 +14781,7 @@ class serializer
                         o->write_character('\"');
                         dump_escaped(i->first, ensure_ascii);
                         o->write_characters("\": ", 3);
-                        dump(i->second, true, ensure_ascii, indent_step, new_indent);
+                        dump(i->second, true, ensure_ascii, indent_step, new_indent, serialize_binary);
                         o->write_characters(",\n", 2);
                     }
 
@@ -14771,7 +14792,7 @@ class serializer
                     o->write_character('\"');
                     dump_escaped(i->first, ensure_ascii);
                     o->write_characters("\": ", 3);
-                    dump(i->second, true, ensure_ascii, indent_step, new_indent);
+                    dump(i->second, true, ensure_ascii, indent_step, new_indent, serialize_binary);
 
                     o->write_character('\n');
                     o->write_characters(indent_string.c_str(), current_indent);
@@ -14788,7 +14809,7 @@ class serializer
                         o->write_character('\"');
                         dump_escaped(i->first, ensure_ascii);
                         o->write_characters("\":", 2);
-                        dump(i->second, false, ensure_ascii, indent_step, current_indent);
+                        dump(i->second, false, ensure_ascii, indent_step, current_indent, serialize_binary);
                         o->write_character(',');
                     }
 
@@ -14798,7 +14819,7 @@ class serializer
                     o->write_character('\"');
                     dump_escaped(i->first, ensure_ascii);
                     o->write_characters("\":", 2);
-                    dump(i->second, false, ensure_ascii, indent_step, current_indent);
+                    dump(i->second, false, ensure_ascii, indent_step, current_indent, serialize_binary);
 
                     o->write_character('}');
                 }
@@ -14830,14 +14851,14 @@ class serializer
                             i != val.m_value.array->cend() - 1; ++i)
                     {
                         o->write_characters(indent_string.c_str(), new_indent);
-                        dump(*i, true, ensure_ascii, indent_step, new_indent);
+                        dump(*i, true, ensure_ascii, indent_step, new_indent, serialize_binary);
                         o->write_characters(",\n", 2);
                     }
 
                     // last element
                     assert(not val.m_value.array->empty());
                     o->write_characters(indent_string.c_str(), new_indent);
-                    dump(val.m_value.array->back(), true, ensure_ascii, indent_step, new_indent);
+                    dump(val.m_value.array->back(), true, ensure_ascii, indent_step, new_indent, serialize_binary);
 
                     o->write_character('\n');
                     o->write_characters(indent_string.c_str(), current_indent);
@@ -14851,13 +14872,13 @@ class serializer
                     for (auto i = val.m_value.array->cbegin();
                             i != val.m_value.array->cend() - 1; ++i)
                     {
-                        dump(*i, false, ensure_ascii, indent_step, current_indent);
+                        dump(*i, false, ensure_ascii, indent_step, current_indent, serialize_binary);
                         o->write_character(',');
                     }
 
                     // last element
                     assert(not val.m_value.array->empty());
-                    dump(val.m_value.array->back(), false, ensure_ascii, indent_step, current_indent);
+                    dump(val.m_value.array->back(), false, ensure_ascii, indent_step, current_indent, serialize_binary);
 
                     o->write_character(']');
                 }
@@ -17723,11 +17744,11 @@ class basic_json
 
         if (indent >= 0)
         {
-            s.dump(*this, true, ensure_ascii, static_cast<unsigned int>(indent), serialize_binary);
+            s.dump(*this, true, ensure_ascii, static_cast<unsigned int>(indent), 0, serialize_binary);
         }
         else
         {
-            s.dump(*this, false, ensure_ascii, 0, serialize_binary);
+            s.dump(*this, false, ensure_ascii, 0, 0, serialize_binary);
         }
 
         return result;
@@ -18239,6 +18260,18 @@ class basic_json
 
     /// get a pointer to the value (binary)
     constexpr const binary_t* get_impl_ptr(const binary_t* /*unused*/) const noexcept
+    {
+        return is_binary() ? m_value.binary : nullptr;
+    }
+
+    /// get a pointer to the value (binary)
+    internal_binary_t* get_impl_ptr(internal_binary_t* /*unused*/) noexcept
+    {
+        return is_binary() ? m_value.binary : nullptr;
+    }
+
+    /// get a pointer to the value (binary)
+    constexpr const internal_binary_t* get_impl_ptr(const internal_binary_t* /*unused*/) const noexcept
     {
         return is_binary() ? m_value.binary : nullptr;
     }

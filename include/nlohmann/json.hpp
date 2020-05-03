@@ -2237,11 +2237,11 @@ class basic_json
 
         if (indent >= 0)
         {
-            s.dump(*this, true, ensure_ascii, static_cast<unsigned int>(indent), serialize_binary);
+            s.dump(*this, true, ensure_ascii, static_cast<unsigned int>(indent), 0, serialize_binary);
         }
         else
         {
-            s.dump(*this, false, ensure_ascii, 0, serialize_binary);
+            s.dump(*this, false, ensure_ascii, 0, 0, serialize_binary);
         }
 
         return result;
@@ -2753,6 +2753,18 @@ class basic_json
 
     /// get a pointer to the value (binary)
     constexpr const binary_t* get_impl_ptr(const binary_t* /*unused*/) const noexcept
+    {
+        return is_binary() ? m_value.binary : nullptr;
+    }
+
+    /// get a pointer to the value (binary)
+    internal_binary_t* get_impl_ptr(internal_binary_t* /*unused*/) noexcept
+    {
+        return is_binary() ? m_value.binary : nullptr;
+    }
+
+    /// get a pointer to the value (binary)
+    constexpr const internal_binary_t* get_impl_ptr(const internal_binary_t* /*unused*/) const noexcept
     {
         return is_binary() ? m_value.binary : nullptr;
     }
