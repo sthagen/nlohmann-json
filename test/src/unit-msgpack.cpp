@@ -1132,9 +1132,9 @@ TEST_CASE("MessagePack")
 
                     // create JSON value with byte array containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
                     std::uint8_t subtype = 42;
-                    j.set_subtype(subtype);
+                    j.get_binary().set_subtype(subtype);
 
                     // create expected byte vector
                     std::vector<uint8_t> expected;
@@ -1207,9 +1207,9 @@ TEST_CASE("MessagePack")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
                     std::uint8_t subtype = 42;
-                    j.set_subtype(subtype);
+                    j.get_binary().set_subtype(subtype);
 
                     // create expected byte vector (hack: create string first)
                     std::vector<uint8_t> expected(N, 'x');
@@ -1243,9 +1243,9 @@ TEST_CASE("MessagePack")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
                     std::uint8_t subtype = 42;
-                    j.set_subtype(subtype);
+                    j.get_binary().set_subtype(subtype);
 
                     // create expected byte vector (hack: create string first)
                     std::vector<uint8_t> expected(N, 'x');
@@ -1281,7 +1281,7 @@ TEST_CASE("MessagePack")
 
                     // create JSON value with byte array containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector
                     std::vector<std::uint8_t> expected;
@@ -1319,7 +1319,7 @@ TEST_CASE("MessagePack")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<std::uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector (hack: create string first)
                     std::vector<std::uint8_t> expected(N, 'x');
@@ -1352,7 +1352,7 @@ TEST_CASE("MessagePack")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<std::uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector (hack: create string first)
                     std::vector<uint8_t> expected(N, 'x');
@@ -1418,6 +1418,7 @@ TEST_CASE("MessagePack")
             CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0xa5, 0x68, 0x65})), json::parse_error&);
             CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0x92, 0x01})), json::parse_error&);
             CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0x81, 0xa1, 0x61})), json::parse_error&);
+            CHECK_THROWS_AS(_ = json::from_msgpack(std::vector<uint8_t>({0xc4, 0x02})), json::parse_error&);
 
             CHECK_THROWS_WITH(_ = json::from_msgpack(std::vector<uint8_t>({0x87})),
                               "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing MessagePack string: unexpected end of input");
@@ -1457,6 +1458,8 @@ TEST_CASE("MessagePack")
                               "[json.exception.parse_error.110] parse error at byte 3: syntax error while parsing MessagePack value: unexpected end of input");
             CHECK_THROWS_WITH(_ = json::from_msgpack(std::vector<uint8_t>({0x81, 0xa1, 0x61})),
                               "[json.exception.parse_error.110] parse error at byte 4: syntax error while parsing MessagePack value: unexpected end of input");
+            CHECK_THROWS_WITH(_ = json::from_msgpack(std::vector<uint8_t>({0xc4, 0x02})),
+                              "[json.exception.parse_error.110] parse error at byte 3: syntax error while parsing MessagePack binary: unexpected end of input");
 
             CHECK(json::from_msgpack(std::vector<uint8_t>({0x87}), true, false).is_discarded());
             CHECK(json::from_msgpack(std::vector<uint8_t>({0xcc}), true, false).is_discarded());
@@ -1477,6 +1480,8 @@ TEST_CASE("MessagePack")
             CHECK(json::from_msgpack(std::vector<uint8_t>({0xa5, 0x68, 0x65}), true, false).is_discarded());
             CHECK(json::from_msgpack(std::vector<uint8_t>({0x92, 0x01}), true, false).is_discarded());
             CHECK(json::from_msgpack(std::vector<uint8_t>({0x81, 0xA1, 0x61}), true, false).is_discarded());
+            CHECK(json::from_msgpack(std::vector<uint8_t>({0xc4, 0x02}), true, false).is_discarded());
+            CHECK(json::from_msgpack(std::vector<uint8_t>({0xc4}), true, false).is_discarded());
         }
 
         SECTION("unsupported bytes")

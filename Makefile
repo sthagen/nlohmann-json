@@ -102,7 +102,8 @@ doctest:
 # -Wno-switch-enum -Wno-covered-switch-default: pedantic/contradicting warnings about switches
 # -Wno-weak-vtables: exception class is defined inline, but has virtual method
 pedantic_clang:
-	$(MAKE) json_unit CXX=c++ CXXFLAGS=" \
+	rm -fr build_pedantic
+	CXXFLAGS=" \
 		-std=c++11 -Wno-c++98-compat -Wno-c++98-compat-pedantic \
 		-Werror \
 		-Weverything \
@@ -115,11 +116,13 @@ pedantic_clang:
 		-Wno-padded \
 		-Wno-range-loop-analysis \
 		-Wno-switch-enum -Wno-covered-switch-default \
-		-Wno-weak-vtables"
+		-Wno-weak-vtables" cmake -S . -B build_pedantic -GNinja -DCMAKE_BUILD_TYPE=Debug -DJSON_MultipleHeaders=ON
+	cmake --build build_pedantic
 
 # calling GCC with most warnings
 pedantic_gcc:
-	$(MAKE) json_unit CXX=/usr/local/bin/g++-9 CXXFLAGS=" \
+	rm -fr build_pedantic
+	CXXFLAGS=" \
 		-std=c++11 \
 		-Waddress \
 		-Waddress-of-packed-member \
@@ -233,7 +236,7 @@ pedantic_gcc:
 		-Wno-system-headers \
 		-Wno-templates \
 		-Wno-undef \
-		-Wnoexcept \
+		-Wno-noexcept \
 		-Wnoexcept-type \
 		-Wnon-template-friend \
 		-Wnon-virtual-dtor \
@@ -340,7 +343,8 @@ pedantic_gcc:
 		-Wvolatile-register-var \
 		-Wwrite-strings \
 		-Wzero-as-null-pointer-constant \
-		"
+		" cmake -S . -B build_pedantic -GNinja -DCMAKE_BUILD_TYPE=Debug -DJSON_MultipleHeaders=ON
+	cmake --build build_pedantic
 
 ##########################################################################
 # benchmarks
@@ -564,7 +568,7 @@ check_cmake_flags:
 NEXT_VERSION ?= "unreleased"
 
 ChangeLog.md:
-	github_changelog_generator -o ChangeLog.md --simple-list --release-url https://github.com/nlohmann/json/releases/tag/%s --future-release $(NEXT_VERSION)
+	github_changelog_generator -o ChangeLog.md --user nlohmann --project json --simple-list --release-url https://github.com/nlohmann/json/releases/tag/%s --future-release $(NEXT_VERSION)
 	$(SED) -i 's|https://github.com/nlohmann/json/releases/tag/HEAD|https://github.com/nlohmann/json/tree/HEAD|' ChangeLog.md
 	$(SED) -i '2i All notable changes to this project will be documented in this file. This project adheres to [Semantic Versioning](http://semver.org/).' ChangeLog.md
 

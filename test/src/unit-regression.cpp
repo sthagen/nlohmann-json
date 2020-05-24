@@ -464,6 +464,11 @@ TEST_CASE("regression tests")
         s2 = o["name"];
 
         CHECK(s2 == "value");
+
+        // improve coverage
+        o["int"] = 1;
+        CHECK_THROWS_AS(s2 = o["int"], json::type_error);
+        CHECK_THROWS_WITH(s2 = o["int"], "[json.exception.type_error.302] type must be string, but is number");
     }
 
     SECTION("issue #146 - character following a surrogate pair is skipped")
@@ -1914,8 +1919,7 @@ TEST_CASE("regression tests")
             j.dump(4,                              // Indent
                    ' ',                            // Indent char
                    false,                          // Ensure ascii
-                   json::error_handler_t::strict,  // Error
-                   true                            // Allow binary data
+                   json::error_handler_t::strict  // Error
                   )
         );
     }

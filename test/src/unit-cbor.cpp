@@ -130,6 +130,24 @@ TEST_CASE("CBOR")
             CHECK(result.empty());
         }
 
+        SECTION("NaN")
+        {
+            // NaN value
+            json j = std::numeric_limits<json::number_float_t>::quiet_NaN();
+            std::vector<uint8_t> expected = {0xf9, 0x7e, 0x00};
+            const auto result = json::to_cbor(j);
+            CHECK(result == expected);
+        }
+
+        SECTION("Infinity")
+        {
+            // Infinity value
+            json j = std::numeric_limits<json::number_float_t>::infinity();
+            std::vector<uint8_t> expected = {0xf9, 0x7c, 0x00};
+            const auto result = json::to_cbor(j);
+            CHECK(result == expected);
+        }
+
         SECTION("null")
         {
             json j = nullptr;
@@ -816,7 +834,7 @@ TEST_CASE("CBOR")
                 }
             }
 
-            SECTION("float")
+            SECTION("double-precision float")
             {
                 SECTION("3.1415925")
                 {
@@ -835,6 +853,135 @@ TEST_CASE("CBOR")
 
                     CHECK(json::from_cbor(result, true, false) == j);
                 }
+            }
+
+            SECTION("single-precision float")
+            {
+                SECTION("0.5")
+                {
+                    double v = 0.5;
+                    json j = v;
+                    // its double-precision float binary value is
+                    // {0xfb, 0x3f, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+                    // but to save memory, we can store it as single-precision float.
+                    std::vector<uint8_t> expected = {0xfa, 0x3f, 0x00, 0x00, 0x00};
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("0.0")
+                {
+                    double v = 0.0;
+                    json j = v;
+                    // its double-precision binary value is:
+                    // {0xfb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+                    std::vector<uint8_t> expected = {0xfa, 0x00, 0x00, 0x00, 0x00};
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("-0.0")
+                {
+                    double v = -0.0;
+                    json j = v;
+                    // its double-precision binary value is:
+                    // {0xfb, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+                    std::vector<uint8_t> expected = {0xfa, 0x80, 0x00, 0x00, 0x00};
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("100.0")
+                {
+                    double v = 100.0;
+                    json j = v;
+                    // its double-precision binary value is:
+                    // {0xfb, 0x40, 0x59, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+                    std::vector<uint8_t> expected = {0xfa, 0x42, 0xc8, 0x00, 0x00};
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("200.0")
+                {
+                    double v = 200.0;
+                    json j = v;
+                    // its double-precision binary value is:
+                    // {0xfb, 0x40, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+                    std::vector<uint8_t> expected = {0xfa, 0x43, 0x48, 0x00, 0x00};
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("3.40282e+38(max float)")
+                {
+                    float v = (std::numeric_limits<float>::max)();
+                    json j = v;
+                    std::vector<uint8_t> expected =
+                    {
+                        0xfa, 0x7f, 0x7f, 0xff, 0xff
+                    };
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("-3.40282e+38(lowest float)")
+                {
+                    double v = static_cast<double>(std::numeric_limits<float>::lowest());
+                    json j = v;
+                    std::vector<uint8_t> expected =
+                    {
+                        0xfa, 0xff, 0x7f, 0xff, 0xff
+                    };
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("1 + 3.40282e+38(more than max float)")
+                {
+                    double v = static_cast<double>((std::numeric_limits<float>::max)()) + 0.1e+34;
+                    json j = v;
+                    std::vector<uint8_t> expected =
+                    {
+                        0xfb, 0x47, 0xf0, 0x00, 0x03, 0x04, 0xdc, 0x64, 0x49
+                    };
+                    // double
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+                SECTION("-1 - 3.40282e+38(less than lowest float)")
+                {
+                    double v = static_cast<double>(std::numeric_limits<float>::lowest()) - 1.0;
+                    json j = v;
+                    std::vector<uint8_t> expected =
+                    {
+                        0xfa, 0xff, 0x7f, 0xff, 0xff
+                    };
+                    // the same with lowest float
+                    const auto result = json::to_cbor(j);
+                    CHECK(result == expected);
+                    // roundtrip
+                    CHECK(json::from_cbor(result) == j);
+                    CHECK(json::from_cbor(result) == v);
+                }
+
             }
 
             SECTION("half-precision float (edge cases)")
@@ -936,7 +1083,7 @@ TEST_CASE("CBOR")
 
                 SECTION("NaN")
                 {
-                    json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c, 0x01}));
+                    json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7e, 0x00}));
                     json::number_float_t d = j;
                     CHECK(std::isnan(d));
                     CHECK(j.dump() == "null");
@@ -1303,7 +1450,7 @@ TEST_CASE("CBOR")
 
                     // create JSON value with byte array containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector
                     std::vector<uint8_t> expected;
@@ -1337,7 +1484,7 @@ TEST_CASE("CBOR")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector
                     std::vector<uint8_t> expected;
@@ -1372,7 +1519,7 @@ TEST_CASE("CBOR")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector (hack: create string first)
                     std::vector<uint8_t> expected(N, 'x');
@@ -1405,7 +1552,7 @@ TEST_CASE("CBOR")
 
                     // create JSON value with string containing of N * 'x'
                     const auto s = std::vector<uint8_t>(N, 'x');
-                    json j = json::binary_array(s);
+                    json j = json::binary(s);
 
                     // create expected byte vector (hack: create string first)
                     std::vector<uint8_t> expected(N, 'x');
@@ -1428,6 +1575,53 @@ TEST_CASE("CBOR")
                     CHECK(json::from_cbor(result, true, false) == j);
                 }
             }
+
+            SECTION("indefinite size")
+            {
+                std::vector<std::uint8_t> input = {0x5F, 0x44, 0xaa, 0xbb, 0xcc, 0xdd, 0x43, 0xee, 0xff, 0x99, 0xFF};
+                auto j = json::from_cbor(input);
+                CHECK(j.is_binary());
+                auto k = json::binary({0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x99});
+                CAPTURE(j.dump(0, ' ', false, json::error_handler_t::strict))
+                CHECK(j == k);
+            }
+
+            SECTION("binary in array")
+            {
+                // array with three empty byte strings
+                std::vector<std::uint8_t> input = {0x83, 0x40, 0x40, 0x40};
+                CHECK_NOTHROW(json::from_cbor(input));
+            }
+
+            SECTION("binary in object")
+            {
+                // object mapping "foo" to empty byte string
+                std::vector<std::uint8_t> input = {0xA1, 0x63, 0x66, 0x6F, 0x6F, 0x40};
+                CHECK_NOTHROW(json::from_cbor(input));
+            }
+
+            SECTION("SAX callback with binary")
+            {
+                // object mapping "foo" to byte string
+                std::vector<std::uint8_t> input = {0xA1, 0x63, 0x66, 0x6F, 0x6F, 0x41, 0x00};
+
+                // callback to set binary_seen to true if a binary value was seen
+                bool binary_seen = false;
+                auto callback = [&binary_seen](int /*depth*/, json::parse_event_t /*event*/, json & parsed)
+                {
+                    if (parsed.is_binary())
+                    {
+                        binary_seen = true;
+                    }
+                    return true;
+                };
+
+                json j;
+                auto cbp = nlohmann::detail::json_sax_dom_callback_parser<json>(j, callback, true);
+                CHECK(json::sax_parse(input, &cbp, json::input_format_t::cbor));
+                CHECK(j.at("foo").is_binary());
+                CHECK(binary_seen);
+            }
         }
     }
 
@@ -1439,7 +1633,7 @@ TEST_CASE("CBOR")
                                           0x00, 0x00, 0x00, 0x01, 0x61
                                          };
             json j = json::from_cbor(given);
-            CHECK(j == json::binary_array(std::vector<uint8_t> {'a'}));
+            CHECK(j == json::binary(std::vector<uint8_t> {'a'}));
         }
 
         SECTION("0x7b (string)")
@@ -1508,6 +1702,9 @@ TEST_CASE("CBOR")
             CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61, 0xF5})), json::parse_error&);
             CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0xA1, 0x61, 0X61})), json::parse_error&);
             CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0X61})), json::parse_error&);
+            CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0x5F})), json::parse_error&);
+            CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0x5F, 0x00})), json::parse_error&);
+            CHECK_THROWS_AS(_ = json::from_cbor(std::vector<uint8_t>({0x41})), json::parse_error&);
 
             CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x18})),
                               "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing CBOR number: unexpected end of input");
@@ -1557,6 +1754,12 @@ TEST_CASE("CBOR")
                               "[json.exception.parse_error.110] parse error at byte 4: syntax error while parsing CBOR value: unexpected end of input");
             CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61})),
                               "[json.exception.parse_error.110] parse error at byte 4: syntax error while parsing CBOR value: unexpected end of input");
+            CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x5F})),
+                              "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing CBOR binary: unexpected end of input");
+            CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x5F, 0x00})),
+                              "[json.exception.parse_error.113] parse error at byte 2: syntax error while parsing CBOR binary: expected length specification (0x40-0x5B) or indefinite binary array type (0x5F); last byte: 0x00");
+            CHECK_THROWS_WITH(_ = json::from_cbor(std::vector<uint8_t>({0x41})),
+                              "[json.exception.parse_error.110] parse error at byte 2: syntax error while parsing CBOR binary: unexpected end of input");
 
             CHECK(json::from_cbor(std::vector<uint8_t>({0x18}), true, false).is_discarded());
             CHECK(json::from_cbor(std::vector<uint8_t>({0x19}), true, false).is_discarded());
@@ -1582,6 +1785,9 @@ TEST_CASE("CBOR")
             CHECK(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61, 0xF5}), true, false).is_discarded());
             CHECK(json::from_cbor(std::vector<uint8_t>({0xA1, 0x61, 0x61}), true, false).is_discarded());
             CHECK(json::from_cbor(std::vector<uint8_t>({0xBF, 0x61, 0x61}), true, false).is_discarded());
+            CHECK(json::from_cbor(std::vector<uint8_t>({0x5F}), true, false).is_discarded());
+            CHECK(json::from_cbor(std::vector<uint8_t>({0x5F, 0x00}), true, false).is_discarded());
+            CHECK(json::from_cbor(std::vector<uint8_t>({0x41}), true, false).is_discarded());
         }
 
         SECTION("unsupported bytes")
@@ -2296,7 +2502,7 @@ TEST_CASE("examples from RFC 7049 Appendix A")
         std::ifstream f_bin(TEST_DATA_DIRECTORY "/binary_data/cbor_binary.out", std::ios::binary);
         std::vector<uint8_t> expected((std::istreambuf_iterator<char>(f_bin)),
                                       std::istreambuf_iterator<char>());
-        CHECK(j == json::binary_array(expected));
+        CHECK(j == json::binary(expected));
     }
 
     SECTION("arrays")
