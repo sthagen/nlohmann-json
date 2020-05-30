@@ -3207,7 +3207,7 @@ class basic_json
                    not std::is_same<ValueType, typename string_t::value_type>::value and
                    not detail::is_basic_json<ValueType>::value
                    and not std::is_same<ValueType, std::initializer_list<typename string_t::value_type>>::value
-#if defined(JSON_HAS_CPP_17) && (defined(__GNUC__) || (defined(_MSC_VER) and _MSC_VER <= 1914))
+#if defined(JSON_HAS_CPP_17) && (defined(__GNUC__) || (defined(_MSC_VER) and _MSC_VER >= 1910 and _MSC_VER <= 1914))
                    and not std::is_same<ValueType, typename std::string_view>::value
 #endif
                    and detail::is_detected<detail::get_template_function, const basic_json_t&, ValueType>::value
@@ -3768,7 +3768,8 @@ class basic_json
     @since version 1.0.0
     */
     template<class ValueType, typename std::enable_if<
-                 std::is_convertible<basic_json_t, ValueType>::value, int>::type = 0>
+                 std::is_convertible<basic_json_t, ValueType>::value
+                 and not std::is_same<value_t, ValueType>::value, int>::type = 0>
     ValueType value(const typename object_t::key_type& key, const ValueType& default_value) const
     {
         // at only works for objects

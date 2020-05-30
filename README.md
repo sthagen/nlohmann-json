@@ -148,7 +148,7 @@ Example:
 include(FetchContent)
 
 FetchContent_Declare(json
-  GIT_REPOSITORY https://github.com/nlohmann/json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG v3.7.3)
 
 FetchContent_GetProperties(json)
@@ -544,6 +544,11 @@ for (auto& [key, value] : o.items()) {
 }
 
 // find an entry
+if (o.contains("foo")) {
+  // there is an entry with key "foo"
+}
+
+// or via find and an iterator
 if (o.find("foo") != o.end()) {
   // there is an entry with key "foo"
 }
@@ -1085,7 +1090,7 @@ auto cbor = json::to_msgpack(j); // 0xD5 (fixext2), 0x10, 0xCA, 0xFE
 
 Though it's 2020 already, the support for C++11 is still a bit sparse. Currently, the following compilers are known to work:
 
-- GCC 4.8 - 10.0 (and possibly later)
+- GCC 4.8 - 10.1 (and possibly later)
 - Clang 3.4 - 10.0 (and possibly later)
 - Intel C++ Compiler 17.0.2 (and possibly later)
 - Microsoft Visual C++ 2015 / Build Tools 14.0.25123.0 (and possibly later)
@@ -1142,6 +1147,7 @@ The following compilers are currently used in continuous integration at [Travis]
 | GCC 7.5.0 (Ubuntu 7.5.0-3ubuntu1~18.04)                         | Ubuntu 18.04.4 LTS | GitHub Actions |
 | GCC 8.4.0 (Ubuntu 8.4.0-1ubuntu1~14.04)                         | Ubuntu 14.04.5 LTS | Travis         |
 | GCC 9.3.0 (Ubuntu 9.3.0-11ubuntu0~14.04)                        | Ubuntu 14.04.5 LTS | Travis         |
+| GCC 10.1.0 (Arch Linux latest)                                  | Arch Linux         | Circle CI      |
 | MSVC 19.0.24241.7 (Build Engine version 14.0.25420.1)           | Windows-6.3.9600   | AppVeyor       |
 | MSVC 19.16.27035.0 (15.9.21+g9802d43bc3 for .NET Framework)     | Windows-10.0.14393 | AppVeyor       |
 | MSVC 19.25.28614.0 (Build Engine version 16.5.0+d4cbfca49 for .NET Framework) | Windows-10.0.17763  | AppVeyor       |
@@ -1224,7 +1230,7 @@ I deeply appreciate the help of the following people.
 - [Mário Feroldi](https://github.com/thelostt) fixed a small typo.
 - [duncanwerner](https://github.com/duncanwerner) found a really embarrassing performance regression in the 2.0.0 release.
 - [Damien](https://github.com/dtoma) fixed one of the last conversion warnings.
-- [Thomas Braun](https://github.com/t-b) fixed a warning in a test case.
+- [Thomas Braun](https://github.com/t-b) fixed a warning in a test case and adjusted MSVC calls in the CI.
 - [Théo DELRIEU](https://github.com/theodelrieu) patiently and constructively oversaw the long way toward [iterator-range parsing](https://github.com/nlohmann/json/issues/290). He also implemented the magic behind the serialization/deserialization of user-defined types and split the single header file into smaller chunks.
 - [Stefan](https://github.com/5tefan) fixed a minor issue in the documentation.
 - [Vasil Dimov](https://github.com/vasild) fixed the documentation regarding conversions from `std::multiset`.
@@ -1368,6 +1374,33 @@ I deeply appreciate the help of the following people.
 - [Florian Pigorsch](https://github.com/flopp) fixed a lot of typos.
 - [Camille Bégué](https://github.com/cbegue) fixed an issue in the conversion from  `std::pair` and `std::tuple` to `json`.
 - [Anthony VH](https://github.com/AnthonyVH) fixed a compile error in an enum deserialization.
+- [Yuriy Vountesmery](https://github.com/ua-code-dragon) noted a subtle bug in a preprocessor check.
+- [Chen](https://github.com/dota17) fixed numerous issues in the library.
+- [Antony Kellermann](https://github.com/aokellermann) added a CI step for GCC 10.1.
+- [Alex](https://github.com/gistrec) fixed an MSVC warning.
+- [Rainer](https://github.com/rvjr) proposed an improvement in the floating-point serialization in CBOR.
+- [Francois Chabot](https://github.com/FrancoisChabot) made performance improvements in the input adapters.
+- [Arthur Sonzogni](https://github.com/ArthurSonzogni) documented how the library can be included via `FetchContent`.
+- [Rimas Misevičius](https://github.com/rmisev) fixed an error message.
+- [Alexander Myasnikov](https://github.com/alexandermyasnikov) fixed some examples and a link in the README.
+- [Hubert Chathi](https://github.com/uhoreg) made CMake's version config file architecture-independent.
+- [OmnipotentEntity](https://github.com/OmnipotentEntity) implemented the binary values for CBOR, MessagePack, BSON, and UBJSON.
+- [ArtemSarmini](https://github.com/ArtemSarmini) fixed a compilation issue with GCC 10 and fixed a leak.
+- [Evgenii Sopov](https://github.com/sea-kg) integrated the library to the wsjcpp package manager.
+- [Sergey Linev](https://github.com/linev) fixed a compiler warning.
+- [Miguel Magalhães](https://github.com/magamig) fixed the year in the copyright.
+- [Gareth Sylvester-Bradley](https://github.com/garethsb-sony) fixed a compilation issue with MSVC.
+- [Alexander “weej” Jones](https://github.com/alex-weej) fixed an example in the README.
+- [Antoine Cœur](https://github.com/Coeur) fixed some typos in the documentation.
+- [jothepro](https://github.com/jothepro) updated links to the Hunter package.
+- [Dave Lee](https://github.com/kastiglione) fixed link in the README.
+- [Joël Lamotte](https://github.com/Klaim) added instruction for using Build2's package manager.
+- [Paul Jurczak](https://github.com/pauljurczak) fixed an example in the README.
+- [Sonu Lohani](https://github.com/sonulohani) fixed a warning.
+- [Carlos Gomes Martinho](https://github.com/gocarlos) updated the Conan package source.
+- [Konstantin Podsvirov](https://github.com/podsvirov) fixed the MSYS2 package documentation.
+- [Tridacnid](https://github.com/Tridacnid) improved the CMake tests.
+- [Michael](https://github.com/MBalszun) fixed MSVC warnings.
 
 Thanks a lot for helping out! Please [let me know](mailto:mail@nlohmann.me) if I forgot someone.
 
@@ -1468,7 +1501,7 @@ To compile and run the tests, you need to execute
 ```sh
 $ mkdir build
 $ cd build
-$ cmake ..
+$ cmake .. -DJSON_BuildTests=On
 $ cmake --build .
 $ ctest --output-on-failure
 ```
