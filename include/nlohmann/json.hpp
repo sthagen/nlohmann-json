@@ -196,10 +196,12 @@ class basic_json
     static ::nlohmann::detail::parser<basic_json, InputAdapterType> parser(
         InputAdapterType adapter,
         detail::parser_callback_t<basic_json>cb = nullptr,
-        bool allow_exceptions = true
+        const bool allow_exceptions = true,
+        const bool ignore_comments = false
     )
     {
-        return ::nlohmann::detail::parser<basic_json, InputAdapterType>(std::move(adapter), std::move(cb), allow_exceptions);
+        return ::nlohmann::detail::parser<basic_json, InputAdapterType>(std::move(adapter),
+                std::move(cb), allow_exceptions, ignore_comments);
     }
 
     using primitive_iterator_t = ::nlohmann::detail::primitive_iterator_t;
@@ -3770,7 +3772,7 @@ class basic_json
     template<class ValueType, typename std::enable_if<
                  std::is_convertible<basic_json_t, ValueType>::value
                  and not std::is_same<value_t, ValueType>::value, int>::type = 0>
-    ValueType value(const typename object_t::key_type& key, const ValueType& default_value) const
+    ValueType value(const typename object_t::key_type& key, ValueType && default_value) const
     {
         // at only works for objects
         if (JSON_HEDLEY_LIKELY(is_object()))
@@ -3782,7 +3784,7 @@ class basic_json
                 return *it;
             }
 
-            return default_value;
+            return std::move(default_value);
         }
 
         JSON_THROW(type_error::create(306, "cannot use value() with " + std::string(type_name())));
@@ -3794,7 +3796,7 @@ class basic_json
     */
     string_t value(const typename object_t::key_type& key, const char* default_value) const
     {
-        return value(key, string_t(default_value));
+        return value(key, std::move(string_t(default_value)));
     }
 
     /*!
@@ -3842,7 +3844,7 @@ class basic_json
     */
     template<class ValueType, typename std::enable_if<
                  std::is_convertible<basic_json_t, ValueType>::value, int>::type = 0>
-    ValueType value(const json_pointer& ptr, const ValueType& default_value) const
+    ValueType value(const json_pointer& ptr, ValueType && default_value) const
     {
         // at only works for objects
         if (JSON_HEDLEY_LIKELY(is_object()))
@@ -3854,7 +3856,7 @@ class basic_json
             }
             JSON_INTERNAL_CATCH (out_of_range&)
             {
-                return default_value;
+                return std::move(default_value);
             }
         }
 
@@ -3868,7 +3870,7 @@ class basic_json
     JSON_HEDLEY_NON_NULL(3)
     string_t value(const json_pointer& ptr, const char* default_value) const
     {
-        return value(ptr, string_t(default_value));
+        return value(ptr, std::move(string_t(default_value)));
     }
 
     /*!
@@ -5865,6 +5867,34 @@ class basic_json
     /*!
     @brief exchanges the values
 
+    Exchanges the contents of the JSON value from @a left with those of @a right. Does not
+    invoke any move, copy, or swap operations on individual elements. All
+    iterators and references remain valid. The past-the-end iterator is
+    invalidated. implemented as a friend function callable via ADL.
+
+    @param[in,out] left JSON value to exchange the contents with
+    @param[in,out] right JSON value to exchange the contents with
+
+    @complexity Constant.
+
+    @liveexample{The example below shows how JSON values can be swapped with
+    `swap()`.,swap__reference}
+
+    @since version 1.0.0
+    */
+    friend void swap(reference left, reference right) noexcept (
+        std::is_nothrow_move_constructible<value_t>::value and
+        std::is_nothrow_move_assignable<value_t>::value and
+        std::is_nothrow_move_constructible<json_value>::value and
+        std::is_nothrow_move_assignable<json_value>::value
+    )
+    {
+        left.swap(right);
+    }
+
+    /*!
+    @brief exchanges the values
+
     Exchanges the contents of a JSON array with those of @a other. Does not
     invoke any move, copy, or swap operations on individual elements. All
     iterators and references remain valid. The past-the-end iterator is
@@ -6563,6 +6593,9 @@ class basic_json
     (optional)
     @param[in] allow_exceptions  whether to throw exceptions in case of a
     parse error (optional, true by default)
+    @param[in] ignore_comments  whether comments should be ignored and treated
+    like whitespace (true) or yield a parse error (true); (optional, false by
+    default)
 
     @return deserialized JSON value; in case of a parse error and
             @a allow_exceptions set to `false`, the return value will be
@@ -6591,16 +6624,18 @@ class basic_json
     @liveexample{The example below demonstrates the `parse()` function reading
     from a contiguous container.,parse__contiguouscontainer__parser_callback_t}
 
-    @since version 2.0.3 (contiguous containers)
+    @since version 2.0.3 (contiguous containers); version 3.9.0 allowed to
+    ignore comments.
     */
     template<typename InputType>
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json parse(InputType&& i,
                             const parser_callback_t cb = nullptr,
-                            const bool allow_exceptions = true)
+                            const bool allow_exceptions = true,
+                            const bool ignore_comments = false)
     {
         basic_json result;
-        parser(detail::input_adapter(std::forward<InputType>(i)), cb, allow_exceptions).parse(true, result);
+        parser(detail::input_adapter(std::forward<InputType>(i)), cb, allow_exceptions, ignore_comments).parse(true, result);
         return result;
     }
 
@@ -6617,6 +6652,9 @@ class basic_json
     (optional)
     @param[in] allow_exceptions  whether to throw exceptions in case of a
     parse error (optional, true by default)
+    @param[in] ignore_comments  whether comments should be ignored and treated
+    like whitespace (true) or yield a parse error (true); (optional, false by
+    default)
 
     @return deserialized JSON value; in case of a parse error and
             @a allow_exceptions set to `false`, the return value will be
@@ -6632,10 +6670,11 @@ class basic_json
     static basic_json parse(IteratorType first,
                             IteratorType last,
                             const parser_callback_t cb = nullptr,
-                            const bool allow_exceptions = true)
+                            const bool allow_exceptions = true,
+                            const bool ignore_comments = false)
     {
         basic_json result;
-        parser(detail::input_adapter(std::move(first), std::move(last)), cb, allow_exceptions).parse(true, result);
+        parser(detail::input_adapter(std::move(first), std::move(last)), cb, allow_exceptions, ignore_comments).parse(true, result);
         return result;
     }
 
@@ -6643,10 +6682,11 @@ class basic_json
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, parse(ptr, ptr + len))
     static basic_json parse(detail::span_input_adapter&& i,
                             const parser_callback_t cb = nullptr,
-                            const bool allow_exceptions = true)
+                            const bool allow_exceptions = true,
+                            const bool ignore_comments = false)
     {
         basic_json result;
-        parser(i.get(), cb, allow_exceptions).parse(true, result);
+        parser(i.get(), cb, allow_exceptions, ignore_comments).parse(true, result);
         return result;
     }
 
@@ -6666,6 +6706,9 @@ class basic_json
       iterators.
 
     @param[in] i input to read from
+    @param[in] ignore_comments  whether comments should be ignored and treated
+    like whitespace (true) or yield a parse error (true); (optional, false by
+    default)
 
     @return Whether the input read from @a i is valid JSON.
 
@@ -6678,22 +6721,25 @@ class basic_json
     from a string.,accept__string}
     */
     template<typename InputType>
-    static bool accept(InputType&& i)
+    static bool accept(InputType&& i,
+                       const bool ignore_comments = false)
     {
-        return parser(detail::input_adapter(std::forward<InputType>(i))).accept(true);
+        return parser(detail::input_adapter(std::forward<InputType>(i)), nullptr, false, ignore_comments).accept(true);
     }
 
     template<typename IteratorType>
-    static bool accept(IteratorType first, IteratorType last)
+    static bool accept(IteratorType first, IteratorType last,
+                       const bool ignore_comments = false)
     {
-        return parser(detail::input_adapter(std::move(first), std::move(last))).accept(true);
+        return parser(detail::input_adapter(std::move(first), std::move(last)), nullptr, false, ignore_comments).accept(true);
     }
 
     JSON_HEDLEY_WARN_UNUSED_RESULT
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, accept(ptr, ptr + len))
-    static bool accept(detail::span_input_adapter&& i)
+    static bool accept(detail::span_input_adapter&& i,
+                       const bool ignore_comments = false)
     {
-        return parser(i.get()).accept(true);
+        return parser(i.get(), nullptr, false, ignore_comments).accept(true);
     }
 
     /*!
@@ -6713,6 +6759,9 @@ class basic_json
     @param[in,out] sax  SAX event listener
     @param[in] format  the format to parse (JSON, CBOR, MessagePack, or UBJSON)
     @param[in] strict  whether the input has to be consumed completely
+    @param[in] ignore_comments  whether comments should be ignored and treated
+    like whitespace (true) or yield a parse error (true); (optional, false by
+    default); only applies to the JSON file format.
 
     @return return value of the last processed SAX event
 
@@ -6737,11 +6786,12 @@ class basic_json
     JSON_HEDLEY_NON_NULL(2)
     static bool sax_parse(InputType&& i, SAX* sax,
                           input_format_t format = input_format_t::json,
-                          const bool strict = true)
+                          const bool strict = true,
+                          const bool ignore_comments = false)
     {
         auto ia = detail::input_adapter(std::forward<InputType>(i));
         return format == input_format_t::json
-               ? parser(std::move(ia)).sax_parse(sax, strict)
+               ? parser(std::move(ia), nullptr, true, ignore_comments).sax_parse(sax, strict)
                : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia)).sax_parse(format, sax, strict);
     }
 
@@ -6749,11 +6799,12 @@ class basic_json
     JSON_HEDLEY_NON_NULL(3)
     static bool sax_parse(IteratorType first, IteratorType last, SAX* sax,
                           input_format_t format = input_format_t::json,
-                          const bool strict = true)
+                          const bool strict = true,
+                          const bool ignore_comments = false)
     {
         auto ia = detail::input_adapter(std::move(first), std::move(last));
         return format == input_format_t::json
-               ? parser(std::move(ia)).sax_parse(sax, strict)
+               ? parser(std::move(ia), nullptr, true, ignore_comments).sax_parse(sax, strict)
                : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia)).sax_parse(format, sax, strict);
     }
 
@@ -6762,11 +6813,12 @@ class basic_json
     JSON_HEDLEY_NON_NULL(2)
     static bool sax_parse(detail::span_input_adapter&& i, SAX* sax,
                           input_format_t format = input_format_t::json,
-                          const bool strict = true)
+                          const bool strict = true,
+                          const bool ignore_comments = false)
     {
         auto ia = i.get();
         return format == input_format_t::json
-               ? parser(std::move(ia)).sax_parse(sax, strict)
+               ? parser(std::move(ia), nullptr, true, ignore_comments).sax_parse(sax, strict)
                : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia)).sax_parse(format, sax, strict);
     }
 
@@ -7040,7 +7092,8 @@ class basic_json
     number_unsigned | 256..65535                        | uint 16          | 0xCD
     number_unsigned | 65536..4294967295                 | uint 32          | 0xCE
     number_unsigned | 4294967296..18446744073709551615  | uint 64          | 0xCF
-    number_float    | *any value*                       | float 64         | 0xCB
+    number_float    | *any value representable by a float*     | float 32 | 0xCA
+    number_float    | *any value NOT representable by a float* | float 64 | 0xCB
     string          | *length*: 0..31                   | fixstr           | 0xA0..0xBF
     string          | *length*: 32..255                 | str 8            | 0xD9
     string          | *length*: 256..65535              | str 16           | 0xDA
@@ -7063,9 +7116,6 @@ class basic_json
           - byte strings with more than 4294967295 bytes
           - arrays with more than 4294967295 elements
           - objects with more than 4294967295 elements
-
-    @note The following MessagePack types are not used in the conversion:
-          - float 32 (0xCA)
 
     @note Any MessagePack output created @ref to_msgpack can be successfully
           parsed by @ref from_msgpack.
@@ -8181,7 +8231,7 @@ class basic_json
                     else
                     {
                         const auto idx = json_pointer::array_index(last_path);
-                        if (JSON_HEDLEY_UNLIKELY(static_cast<size_type>(idx) > parent.size()))
+                        if (JSON_HEDLEY_UNLIKELY(idx > parent.size()))
                         {
                             // avoid undefined behavior
                             JSON_THROW(out_of_range::create(401, "array index " + std::to_string(idx) + " is out of range"));
@@ -8224,7 +8274,7 @@ class basic_json
             else if (parent.is_array())
             {
                 // note erase performs range check
-                parent.erase(static_cast<size_type>(json_pointer::array_index(last_path)));
+                parent.erase(json_pointer::array_index(last_path));
             }
         };
 
@@ -8659,6 +8709,9 @@ struct less<::nlohmann::detail::value_t>
     }
 };
 
+// C++20 prohibit function specialization in the std namespace.
+#ifndef JSON_HAS_CPP_20
+
 /*!
 @brief exchanges the values of two JSON objects
 
@@ -8672,6 +8725,8 @@ inline void swap<nlohmann::json>(nlohmann::json& j1, nlohmann::json& j2) noexcep
 {
     j1.swap(j2);
 }
+
+#endif
 
 } // namespace std
 
