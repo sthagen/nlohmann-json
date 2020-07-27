@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++
-|  |  |__   |  |  | | | |  version 3.8.0
+|  |  |__   |  |  | | | |  version 3.9.0
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -31,7 +31,7 @@ SOFTWARE.
 #define INCLUDE_NLOHMANN_JSON_HPP_
 
 #define NLOHMANN_JSON_VERSION_MAJOR 3
-#define NLOHMANN_JSON_VERSION_MINOR 8
+#define NLOHMANN_JSON_VERSION_MINOR 9
 #define NLOHMANN_JSON_VERSION_PATCH 0
 
 #include <algorithm> // all_of, find, for_each
@@ -344,7 +344,7 @@ class basic_json
     {
         basic_json result;
 
-        result["copyright"] = "(C) 2013-2017 Niels Lohmann";
+        result["copyright"] = "(C) 2013-2020 Niels Lohmann";
         result["name"] = "JSON for Modern C++";
         result["url"] = "https://github.com/nlohmann/json";
         result["version"]["string"] =
@@ -1052,7 +1052,7 @@ class basic_json
                     object = nullptr;  // silence warning, see #821
                     if (JSON_HEDLEY_UNLIKELY(t == value_t::null))
                     {
-                        JSON_THROW(other_error::create(500, "961c151d2e87f2686a955a9be24d316f1362bf21 3.8.0")); // LCOV_EXCL_LINE
+                        JSON_THROW(other_error::create(500, "961c151d2e87f2686a955a9be24d316f1362bf21 3.9.0")); // LCOV_EXCL_LINE
                     }
                     break;
                 }
@@ -3229,7 +3229,7 @@ class basic_json
 #endif
                    && detail::is_detected<detail::get_template_function, const basic_json_t&, ValueType>::value
                    , int >::type = 0 >
-    operator ValueType() const
+    JSON_EXPLICIT operator ValueType() const
     {
         // delegate the call to get<>() const
         return get<ValueType>();
@@ -3784,8 +3784,9 @@ class basic_json
 
     @since version 1.0.0
     */
+    // using std::is_convertible in a std::enable_if will fail when using explicit conversions
     template < class ValueType, typename std::enable_if <
-                   std::is_convertible<basic_json_t, ValueType>::value
+                   detail::is_getable<basic_json_t, ValueType>::value
                    && !std::is_same<value_t, ValueType>::value, int >::type = 0 >
     ValueType value(const typename object_t::key_type& key, const ValueType& default_value) const
     {
@@ -3796,7 +3797,7 @@ class basic_json
             const auto it = find(key);
             if (it != end())
             {
-                return *it;
+                return it->template get<ValueType>();
             }
 
             return default_value;
@@ -3858,7 +3859,7 @@ class basic_json
     @since version 2.0.2
     */
     template<class ValueType, typename std::enable_if<
-                 std::is_convertible<basic_json_t, ValueType>::value, int>::type = 0>
+                 detail::is_getable<basic_json_t, ValueType>::value, int>::type = 0>
     ValueType value(const json_pointer& ptr, const ValueType& default_value) const
     {
         // at only works for objects
@@ -3867,7 +3868,7 @@ class basic_json
             // if pointer resolves a value, return it or use default value
             JSON_TRY
             {
-                return ptr.get_checked(this);
+                return ptr.get_checked(this).template get<ValueType>();
             }
             JSON_INTERNAL_CATCH (out_of_range&)
             {
@@ -7035,7 +7036,6 @@ class basic_json
           - bignum (0xC2..0xC3)
           - decimal fraction (0xC4)
           - bigfloat (0xC5)
-          - tagged items (0xC6..0xD4, 0xD8..0xDB)
           - expected conversions (0xD5..0xD7)
           - simple values (0xE0..0xF3, 0xF8)
           - undefined (0xF7)
@@ -7200,6 +7200,7 @@ class basic_json
     number_unsigned | 256..32767                        | int16       | `I`
     number_unsigned | 32768..2147483647                 | int32       | `l`
     number_unsigned | 2147483648..9223372036854775807   | int64       | `L`
+    number_unsigned | 2147483649..18446744073709551615  | high-precision | `H`
     number_float    | *any value*                       | float64     | `D`
     string          | *with shortest length indicator*  | string      | `S`
     array           | *see notes on optimized format*   | array       | `[`
@@ -7210,7 +7211,6 @@ class basic_json
 
     @note The following values can **not** be converted to a UBJSON value:
           - strings with more than 9223372036854775807 bytes (theoretical)
-          - unsigned integer numbers above 9223372036854775807
 
     @note The following markers are not used in the conversion:
           - `Z`: no-op values are not created.
@@ -7422,7 +7422,6 @@ class basic_json
              - bignum (0xC2..0xC3)
              - decimal fraction (0xC4)
              - bigfloat (0xC5)
-             - tagged items (0xC6..0xD4, 0xD8..0xDB)
              - expected conversions (0xD5..0xD7)
              - simple values (0xE0..0xF3, 0xF8)
              - undefined (0xF7)
@@ -7507,7 +7506,7 @@ class basic_json
                                 const bool allow_exceptions = true,
                                 const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
     {
-        return from_cbor(ptr, ptr + len, strict, tag_handler);
+        return from_cbor(ptr, ptr + len, strict, allow_exceptions, tag_handler);
     }
 
 
@@ -7686,6 +7685,7 @@ class basic_json
     int16       | number_integer                          | `I`
     int32       | number_integer                          | `l`
     int64       | number_integer                          | `L`
+    high-precision number | number_integer, number_unsigned, or number_float - depends on number string | 'H'
     string      | string                                  | `S`
     char        | string                                  | `C`
     array       | array (optimized values are supported)  | `[`
@@ -8341,8 +8341,8 @@ class basic_json
             }
 
             // collect mandatory members
-            const std::string op = get_value("op", "op", true);
-            const std::string path = get_value(op, "path", true);
+            const auto op = get_value("op", "op", true).template get<std::string>();
+            const auto path = get_value(op, "path", true).template get<std::string>();
             json_pointer ptr(path);
 
             switch (get_op(op))
@@ -8368,7 +8368,7 @@ class basic_json
 
                 case patch_operations::move:
                 {
-                    const std::string from_path = get_value("move", "from", true);
+                    const auto from_path = get_value("move", "from", true).template get<std::string>();
                     json_pointer from_ptr(from_path);
 
                     // the "from" location must exist - use at()
@@ -8385,7 +8385,7 @@ class basic_json
 
                 case patch_operations::copy:
                 {
-                    const std::string from_path = get_value("copy", "from", true);
+                    const auto from_path = get_value("copy", "from", true).template get<std::string>();
                     const json_pointer from_ptr(from_path);
 
                     // the "from" location must exist - use at()

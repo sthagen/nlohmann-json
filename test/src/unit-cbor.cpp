@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.8.0
+|  |  |__   |  |  | | | |  version 3.9.0
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -39,6 +39,7 @@ using nlohmann::json;
 #include <iostream>
 #include <set>
 #include <test_data.hpp>
+#include "test_utils.hpp"
 
 namespace
 {
@@ -1011,21 +1012,21 @@ TEST_CASE("CBOR")
                     SECTION("0 (0 00000 0000000000)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x00, 0x00}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == 0.0);
                     }
 
                     SECTION("-0 (1 00000 0000000000)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x80, 0x00}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == -0.0);
                     }
 
                     SECTION("2**-24 (0 00000 0000000001)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x00, 0x01}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == std::pow(2.0, -24.0));
                     }
                 }
@@ -1035,7 +1036,7 @@ TEST_CASE("CBOR")
                     SECTION("infinity (0 11111 0000000000)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c, 0x00}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == std::numeric_limits<json::number_float_t>::infinity());
                         CHECK(j.dump() == "null");
                     }
@@ -1043,7 +1044,7 @@ TEST_CASE("CBOR")
                     SECTION("-infinity (1 11111 0000000000)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0xfc, 0x00}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == -std::numeric_limits<json::number_float_t>::infinity());
                         CHECK(j.dump() == "null");
                     }
@@ -1054,21 +1055,21 @@ TEST_CASE("CBOR")
                     SECTION("1 (0 01111 0000000000)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x3c, 0x00}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == 1);
                     }
 
                     SECTION("-2 (1 10000 0000000000)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0xc0, 0x00}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == -2);
                     }
 
                     SECTION("65504 (0 11110 1111111111)")
                     {
                         json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7b, 0xff}));
-                        json::number_float_t d = j;
+                        json::number_float_t d{j};
                         CHECK(d == 65504);
                     }
                 }
@@ -1076,7 +1077,7 @@ TEST_CASE("CBOR")
                 SECTION("infinity")
                 {
                     json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c, 0x00}));
-                    json::number_float_t d = j;
+                    json::number_float_t d{j};
                     CHECK(!std::isfinite(d));
                     CHECK(j.dump() == "null");
                 }
@@ -1084,7 +1085,7 @@ TEST_CASE("CBOR")
                 SECTION("NaN")
                 {
                     json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7e, 0x00}));
-                    json::number_float_t d = j;
+                    json::number_float_t d{j};
                     CHECK(std::isnan(d));
                     CHECK(j.dump() == "null");
                 }
@@ -1920,9 +1921,7 @@ TEST_CASE("single CBOR roundtrip")
         json j1 = json::parse(f_json);
 
         // parse CBOR file
-        std::ifstream f_cbor(filename + ".cbor", std::ios::binary);
-        std::vector<uint8_t> packed((std::istreambuf_iterator<char>(f_cbor)),
-                                    std::istreambuf_iterator<char>());
+        auto packed = utils::read_binary_file(filename + ".cbor");
         json j2;
         CHECK_NOTHROW(j2 = json::from_cbor(packed));
 
@@ -1994,10 +1993,7 @@ TEST_CASE("CBOR regressions")
             try
             {
                 // parse CBOR file
-                std::ifstream f_cbor(filename, std::ios::binary);
-                std::vector<uint8_t> vec1(
-                    (std::istreambuf_iterator<char>(f_cbor)),
-                    std::istreambuf_iterator<char>());
+                auto vec1 = utils::read_binary_file(filename);
                 json j1 = json::from_cbor(vec1);
 
                 try
@@ -2204,10 +2200,7 @@ TEST_CASE("CBOR roundtrips" * doctest::skip())
                 json j1 = json::parse(f_json);
 
                 // parse CBOR file
-                std::ifstream f_cbor(filename + ".cbor", std::ios::binary);
-                std::vector<uint8_t> packed(
-                    (std::istreambuf_iterator<char>(f_cbor)),
-                    std::istreambuf_iterator<char>());
+                auto packed = utils::read_binary_file(filename + ".cbor");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_cbor(packed));
 
@@ -2237,10 +2230,7 @@ TEST_CASE("CBOR roundtrips" * doctest::skip())
                 json j1 = json::parse(f_json);
 
                 // parse CBOR file
-                std::ifstream f_cbor(filename + ".cbor", std::ios::binary);
-                std::vector<uint8_t> packed(
-                    (std::istreambuf_iterator<char>(f_cbor)),
-                    std::istreambuf_iterator<char>());
+                auto packed = utils::read_binary_file(filename + ".cbor");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_cbor({packed.data(), packed.size()}));
 
@@ -2255,10 +2245,7 @@ TEST_CASE("CBOR roundtrips" * doctest::skip())
                 json j1 = json::parse(f_json);
 
                 // parse CBOR file
-                std::ifstream f_cbor(filename + ".cbor", std::ios::binary);
-                std::vector<uint8_t> packed(
-                    (std::istreambuf_iterator<char>(f_cbor)),
-                    std::istreambuf_iterator<char>());
+                auto packed = utils::read_binary_file(filename + ".cbor");
 
                 if (!exclude_packed.count(filename))
                 {
@@ -2493,15 +2480,11 @@ TEST_CASE("examples from RFC 7049 Appendix A")
 
     SECTION("byte arrays")
     {
-        std::ifstream f_cbor(TEST_DATA_DIRECTORY "/binary_data/cbor_binary.cbor", std::ios::binary);
-        std::vector<uint8_t> packed((std::istreambuf_iterator<char>(f_cbor)),
-                                    std::istreambuf_iterator<char>());
+        auto packed = utils::read_binary_file(TEST_DATA_DIRECTORY "/binary_data/cbor_binary.cbor");
         json j;
         CHECK_NOTHROW(j = json::from_cbor(packed));
 
-        std::ifstream f_bin(TEST_DATA_DIRECTORY "/binary_data/cbor_binary.out", std::ios::binary);
-        std::vector<uint8_t> expected((std::istreambuf_iterator<char>(f_bin)),
-                                      std::istreambuf_iterator<char>());
+        auto expected = utils::read_binary_file(TEST_DATA_DIRECTORY "/binary_data/cbor_binary.out");
         CHECK(j == json::binary(expected));
 
         CHECK(json::to_cbor(json::binary(std::vector<uint8_t> {}, 0x42)) == std::vector<uint8_t> {0xd8, 0x42, 0x40});
@@ -2558,10 +2541,10 @@ TEST_CASE("Tagged values")
 
     SECTION("0xC6..0xD4")
     {
-        for (std::uint8_t b :
-                {
-                    0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4
-                })
+        for (auto b : std::vector<std::uint8_t>
+    {
+        0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4
+    })
         {
             // add tag to value
             auto v_tagged = v;
@@ -2721,5 +2704,26 @@ TEST_CASE("Tagged values")
             CHECK_THROWS_AS(json::from_cbor(v_tagged, true, true, json::cbor_tag_handler_t::error), json::parse_error);
             CHECK_THROWS_AS(json::from_cbor(v_tagged, true, true, json::cbor_tag_handler_t::ignore), json::parse_error);
         }
+    }
+
+    SECTION("tagged binary")
+    {
+        // create a binary value of subtype 42
+        json j_binary;
+        j_binary["binary"] = json::binary({0xCA, 0xFE, 0xBA, 0xBE}, 42);
+
+        // convert to CBOR
+        const auto vec = json::to_cbor(j_binary);
+        CHECK(vec == std::vector<std::uint8_t> {0xA1, 0x66, 0x62, 0x69, 0x6E, 0x61, 0x72, 0x79, 0xD8, 0x2A, 0x44, 0xCA, 0xFE, 0xBA, 0xBE});
+
+        // parse error when parsing tagged value
+        CHECK_THROWS_AS(json::from_cbor(vec), json::parse_error);
+        CHECK_THROWS_WITH(json::from_cbor(vec), "[json.exception.parse_error.112] parse error at byte 9: syntax error while parsing CBOR value: invalid byte: 0xD8");
+
+        // binary without subtype when tags are ignored
+        json jb = json::from_cbor(vec, true, true, json::cbor_tag_handler_t::ignore);
+        CHECK(jb.is_object());
+        CHECK(jb["binary"].is_binary());
+        CHECK(!jb["binary"].get_binary().has_subtype());
     }
 }

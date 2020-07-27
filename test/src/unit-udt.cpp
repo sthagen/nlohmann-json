@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.8.0
+|  |  |__   |  |  | | | |  version 3.9.0
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -312,6 +312,7 @@ TEST_CASE("basic usage" * doctest::test_suite("udt"))
             CHECK(name.m_val == "new name");
         }
 
+#if JSON_USE_IMPLICIT_CONVERSIONS
         SECTION("implicit conversions")
         {
             const udt::contact_book parsed_book = big_json;
@@ -335,6 +336,7 @@ TEST_CASE("basic usage" * doctest::test_suite("udt"))
             CHECK(book_name == udt::name{"C++"});
             CHECK(book == parsed_book);
         }
+#endif
     }
 }
 

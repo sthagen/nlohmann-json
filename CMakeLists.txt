@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.1)
 ## PROJECT
 ## name and version
 ##
-project(nlohmann_json VERSION 3.8.0 LANGUAGES CXX)
+project(nlohmann_json VERSION 3.9.0 LANGUAGES CXX)
 
 ##
 ## INCLUDE
@@ -24,6 +24,7 @@ endif ()
 option(JSON_BuildTests "Build the unit tests when BUILD_TESTING is enabled." ON)
 option(JSON_Install "Install CMake targets during install step." ON)
 option(JSON_MultipleHeaders "Use non-amalgamated version of the library." OFF)
+option(JSON_ImplicitConversions "Enable implicit conversions." ON)
 
 ##
 ## CONFIGURATION
@@ -48,6 +49,10 @@ else()
     message(STATUS "Using the single-header code from ${NLOHMANN_JSON_INCLUDE_BUILD_DIR}")
 endif()
 
+if (NOT JSON_ImplicitConversions)
+    message(STATUS "Implicit conversions are disabled")
+endif()
+
 ##
 ## TARGET
 ## create target and add include path
@@ -59,6 +64,12 @@ if (${CMAKE_VERSION} VERSION_LESS "3.8.0")
 else()
     target_compile_features(${NLOHMANN_JSON_TARGET_NAME} INTERFACE cxx_std_11)
 endif()
+
+target_compile_definitions(
+    ${NLOHMANN_JSON_TARGET_NAME}
+    INTERFACE
+    JSON_USE_IMPLICIT_CONVERSIONS=$<BOOL:${JSON_ImplicitConversions}>
+)
 
 target_include_directories(
     ${NLOHMANN_JSON_TARGET_NAME}

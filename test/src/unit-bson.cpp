@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.8.0
+|  |  |__   |  |  | | | |  version 3.9.0
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -35,6 +35,7 @@ using nlohmann::json;
 #include <fstream>
 #include <sstream>
 #include <test_data.hpp>
+#include "test_utils.hpp"
 
 TEST_CASE("BSON")
 {
@@ -1263,10 +1264,7 @@ TEST_CASE("BSON roundtrips" * doctest::skip())
                 json j1 = json::parse(f_json);
 
                 // parse BSON file
-                std::ifstream f_bson(filename + ".bson", std::ios::binary);
-                std::vector<std::uint8_t> packed(
-                    (std::istreambuf_iterator<char>(f_bson)),
-                    std::istreambuf_iterator<char>());
+                auto packed = utils::read_binary_file(filename + ".bson");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_bson(packed));
 
@@ -1296,10 +1294,7 @@ TEST_CASE("BSON roundtrips" * doctest::skip())
                 json j1 = json::parse(f_json);
 
                 // parse BSON file
-                std::ifstream f_bson(filename + ".bson", std::ios::binary);
-                std::vector<std::uint8_t> packed(
-                    (std::istreambuf_iterator<char>(f_bson)),
-                    std::istreambuf_iterator<char>());
+                auto packed = utils::read_binary_file(filename + ".bson");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_bson({packed.data(), packed.size()}));
 
@@ -1314,10 +1309,7 @@ TEST_CASE("BSON roundtrips" * doctest::skip())
                 json j1 = json::parse(f_json);
 
                 // parse BSON file
-                std::ifstream f_bson(filename + ".bson", std::ios::binary);
-                std::vector<std::uint8_t> packed(
-                    (std::istreambuf_iterator<char>(f_bson)),
-                    std::istreambuf_iterator<char>());
+                auto packed = utils::read_binary_file(filename + ".bson");
 
                 {
                     INFO_WITH_TEMP(filename + ": output adapters: std::vector<std::uint8_t>");
