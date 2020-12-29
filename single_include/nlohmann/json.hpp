@@ -2818,6 +2818,7 @@ constexpr T static_const<T>::value;
 #include <limits> // numeric_limits
 #include <type_traits> // false_type, is_constructible, is_integral, is_same, true_type
 #include <utility> // declval
+#include <tuple> // tuple
 
 // #include <nlohmann/detail/iterators/iterator_traits.hpp>
 
@@ -4671,6 +4672,9 @@ class byte_container_with_subtype : public BinaryType
 #include <cstddef> // size_t, uint8_t
 #include <functional> // hash
 
+// #include <nlohmann/detail/macro_scope.hpp>
+
+
 namespace nlohmann
 {
 namespace detail
@@ -4799,6 +4803,7 @@ std::size_t hash(const BasicJsonType& j)
 #include <limits> // numeric_limits
 #include <string> // char_traits, string
 #include <utility> // make_pair, move
+#include <vector> // vector
 
 // #include <nlohmann/detail/exceptions.hpp>
 
@@ -5178,14 +5183,35 @@ typename iterator_input_adapter_factory<IteratorType>::adapter_type input_adapte
 }
 
 // Convenience shorthand from container to iterator
-template<typename ContainerType>
-auto input_adapter(const ContainerType& container) -> decltype(input_adapter(begin(container), end(container)))
-{
-    // Enable ADL
-    using std::begin;
-    using std::end;
+// Enables ADL on begin(container) and end(container)
+// Encloses the using declarations in namespace for not to leak them to outside scope
 
-    return input_adapter(begin(container), end(container));
+namespace container_input_adapter_factory_impl {
+
+using std::begin;
+using std::end;
+
+template<typename ContainerType, typename Enable = void>
+struct container_input_adapter_factory {};
+
+template<typename ContainerType>
+struct container_input_adapter_factory< ContainerType,
+                                        void_t<decltype(begin(std::declval<ContainerType>()), end(std::declval<ContainerType>()))> >
+{
+    using adapter_type = decltype(input_adapter(begin(std::declval<ContainerType>()), end(std::declval<ContainerType>())));
+
+    static adapter_type create(const ContainerType& container)
+    {
+        return input_adapter(begin(container), end(container));
+    }
+};
+
+}
+
+template<typename ContainerType>
+typename container_input_adapter_factory_impl::container_input_adapter_factory<ContainerType>::adapter_type input_adapter(const ContainerType& container)
+{
+    return container_input_adapter_factory_impl::container_input_adapter_factory<ContainerType>::create(container);
 }
 
 // Special cases with fast paths
@@ -10065,7 +10091,7 @@ class binary_reader
                 break;
             }
             result.push_back(static_cast<typename string_t::value_type>(current));
-        };
+        }
         return success;
     }
 
@@ -10706,6 +10732,9 @@ class parser
 
 #include <cstddef> // ptrdiff_t
 #include <limits>  // numeric_limits
+
+// #include <nlohmann/detail/macro_scope.hpp>
+
 
 namespace nlohmann
 {
@@ -16793,7 +16822,7 @@ class basic_json
         detail::parser_callback_t<basic_json>cb = nullptr,
         const bool allow_exceptions = true,
         const bool ignore_comments = false
-                                 )
+    )
     {
         return ::nlohmann::detail::parser<basic_json, InputAdapterType>(std::move(adapter),
                 std::move(cb), allow_exceptions, ignore_comments);
@@ -25338,7 +25367,7 @@ template<>
 inline void swap<nlohmann::json>(nlohmann::json& j1, nlohmann::json& j2) noexcept(
     is_nothrow_move_constructible<nlohmann::json>::value&&
     is_nothrow_move_assignable<nlohmann::json>::value
-                              )
+)
 {
     j1.swap(j2);
 }
@@ -25410,6 +25439,8 @@ inline nlohmann::json::json_pointer operator "" _json_pointer(const char* s, std
 #undef JSON_EXPLICIT
 
 // #include <nlohmann/thirdparty/hedley/hedley_undef.hpp>
+
+
 #undef JSON_HEDLEY_ALWAYS_INLINE
 #undef JSON_HEDLEY_ARM_VERSION
 #undef JSON_HEDLEY_ARM_VERSION_CHECK
