@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.9.1
+|  |  |__   |  |  | | | |  version 3.10.1
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -34,7 +34,8 @@ SOFTWARE.
 
 #define JSON_TESTS_PRIVATE
 #include <nlohmann/json.hpp>
-using nlohmann::json;
+using json = nlohmann::json;
+using ordered_json = nlohmann::ordered_json;
 
 #include <list>
 #include <cstdio>
@@ -52,6 +53,10 @@ using nlohmann::json;
 #ifdef JSON_HAS_CPP_20
     #include <span>
 #endif
+
+// NLOHMANN_JSON_SERIALIZE_ENUM uses a static std::pair
+DOCTEST_CLANG_SUPPRESS_WARNING_PUSH
+DOCTEST_CLANG_SUPPRESS_WARNING("-Wexit-time-destructors")
 
 /////////////////////////////////////////////////////////////////////
 // for #1021
@@ -655,4 +660,25 @@ TEST_CASE("regression tests 2")
     {
         static_assert(std::is_copy_assignable<nlohmann::ordered_json>::value, "");
     }
+
+    SECTION("issue #2958 - Inserting in unordered json using a pointer retains the leading slash")
+    {
+        std::string p = "/root";
+
+        // matching types
+        json test1;
+        test1[json::json_pointer(p)] = json::object();
+        CHECK(test1.dump() == "{\"root\":{}}");
+
+        ordered_json test2;
+        test2[ordered_json::json_pointer(p)] = json::object();
+        CHECK(test2.dump() == "{\"root\":{}}");
+
+        // mixed type - the JSON Pointer is implicitly converted into a string "/root"
+        ordered_json test3;
+        test3[json::json_pointer(p)] = json::object();
+        CHECK(test3.dump() == "{\"/root\":{}}");
+    }
 }
+
+DOCTEST_CLANG_SUPPRESS_WARNING_POP

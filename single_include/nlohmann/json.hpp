@@ -1,7 +1,7 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++
-|  |  |__   |  |  | | | |  version 3.9.1
+|  |  |__   |  |  | | | |  version 3.10.1
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
@@ -31,7 +31,7 @@ SOFTWARE.
 #define INCLUDE_NLOHMANN_JSON_HPP_
 
 #define NLOHMANN_JSON_VERSION_MAJOR 3
-#define NLOHMANN_JSON_VERSION_MINOR 9
+#define NLOHMANN_JSON_VERSION_MINOR 10
 #define NLOHMANN_JSON_VERSION_PATCH 1
 
 #include <algorithm> // all_of, find, for_each
@@ -2250,8 +2250,9 @@ JSON_HEDLEY_DIAGNOSTIC_POP
 
 // disable documentation warnings on clang
 #if defined(__clang__)
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wdocumentation"
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdocumentation"
+    #pragma clang diagnostic ignored "-Wdocumentation-unknown-command"
 #endif
 
 // allow to disable exceptions
@@ -3844,6 +3845,24 @@ struct is_constructible_tuple : std::false_type {};
 template<typename T1, typename... Args>
 struct is_constructible_tuple<T1, std::tuple<Args...>> : conjunction<is_constructible<T1, Args>...> {};
 
+// a naive helper to check if a type is an ordered_map (exploits the fact that
+// ordered_map inherits capacity() from std::vector)
+template <typename T>
+struct is_ordered_map
+{
+    using one = char;
+
+    struct two
+    {
+        char x[2]; // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+    };
+
+    template <typename C> static one test( decltype(&C::capacity) ) ;
+    template <typename C> static two test(...);
+
+    enum { value = sizeof(test<T>(nullptr)) == sizeof(char) }; // NOLINT(cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+};
+
 // to avoid useless casts (see https://github.com/nlohmann/json/issues/2893#issuecomment-889152324)
 template < typename T, typename U, enable_if_t < !std::is_same<T, U>::value, int > = 0 >
 T conditional_static_cast(U value)
@@ -4601,7 +4620,7 @@ struct external_constructor<value_t::binary>
     {
         j.m_value.destroy(j.m_type);
         j.m_type = value_t::binary;
-        j.m_value = typename BasicJsonType::binary_t(std::move(b));;
+        j.m_value = typename BasicJsonType::binary_t(std::move(b));
         j.assert_invariant();
     }
 };
@@ -5003,7 +5022,7 @@ order to override the binary type.
 @tparam BinaryType container to store bytes (`std::vector<std::uint8_t>` by
                    default)
 
-@since version 3.8.0; changed type of subtypes to std::uint64_t in 3.9.2.
+@since version 3.8.0; changed type of subtypes to std::uint64_t in 3.10.0.
 */
 template<typename BinaryType>
 class byte_container_with_subtype : public BinaryType
@@ -5093,7 +5112,7 @@ class byte_container_with_subtype : public BinaryType
     subtype
 
     @since version 3.8.0; fixed return value to properly return
-           subtype_type(-1) as documented in version 3.9.2
+           subtype_type(-1) as documented in version 3.10.0
     */
     constexpr subtype_type subtype() const noexcept
     {
@@ -5167,6 +5186,8 @@ class byte_container_with_subtype : public BinaryType
 #include <functional> // hash
 
 // #include <nlohmann/detail/macro_scope.hpp>
+
+// #include <nlohmann/detail/value_t.hpp>
 
 
 namespace nlohmann
@@ -13614,7 +13635,7 @@ class binary_writer
             case value_t::discarded:
             default:
             {
-                JSON_THROW(type_error::create(317, "to serialize to BSON, top-level type must be object, but is " + std::string(j.type_name()), j));;
+                JSON_THROW(type_error::create(317, "to serialize to BSON, top-level type must be object, but is " + std::string(j.type_name()), j));
             }
         }
     }
@@ -18445,7 +18466,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     object = nullptr;  // silence warning, see #821
                     if (JSON_HEDLEY_UNLIKELY(t == value_t::null))
                     {
-                        JSON_THROW(other_error::create(500, "961c151d2e87f2686a955a9be24d316f1362bf21 3.9.1", basic_json())); // LCOV_EXCL_LINE
+                        JSON_THROW(other_error::create(500, "961c151d2e87f2686a955a9be24d316f1362bf21 3.10.1", basic_json())); // LCOV_EXCL_LINE
                     }
                     break;
                 }
@@ -18715,6 +18736,21 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 return j;
             }
         }
+
+        // ordered_json uses a vector internally, so pointers could have
+        // been invalidated; see https://github.com/nlohmann/json/issues/2962
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(push )
+#pragma warning(disable : 4127) // ignore warning to replace if with if constexpr
+#endif
+        if (detail::is_ordered_map<object_t>::value)
+        {
+            set_parents();
+            return j;
+        }
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning( pop )
+#endif
 
         j.m_parent = this;
 #else
@@ -26423,9 +26459,9 @@ inline nlohmann::json::json_pointer operator "" _json_pointer(const char* s, std
 // #include <nlohmann/detail/macro_unscope.hpp>
 
 
-// restore GCC/clang diagnostic settings
+// restore clang diagnostic settings
 #if defined(__clang__)
-    #pragma GCC diagnostic pop
+    #pragma clang diagnostic pop
 #endif
 
 // clean up
