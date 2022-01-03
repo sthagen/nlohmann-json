@@ -1,12 +1,12 @@
 /*
     __ _____ _____ _____
  __|  |   __|     |   | |  JSON for Modern C++ (test suite)
-|  |  |__   |  |  | | | |  version 3.10.4
+|  |  |__   |  |  | | | |  version 3.10.5
 |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 
 Licensed under the MIT License <http://opensource.org/licenses/MIT>.
 SPDX-License-Identifier: MIT
-Copyright (c) 2013-2019 Niels Lohmann <http://nlohmann.me>.
+Copyright (c) 2013-2022 Niels Lohmann <http://nlohmann.me>.
 
 Permission is hereby  granted, free of charge, to any  person obtaining a copy
 of this software and associated  documentation files (the "Software"), to deal
@@ -56,7 +56,7 @@ TEST_CASE("hash<nlohmann::json>")
 
     // number
     hashes.insert(std::hash<json> {}(json(0)));
-    hashes.insert(std::hash<json> {}(json(unsigned(0))));
+    hashes.insert(std::hash<json> {}(json(static_cast<unsigned>(0))));
 
     hashes.insert(std::hash<json> {}(json(-1)));
     hashes.insert(std::hash<json> {}(json(0.0)));
@@ -105,7 +105,7 @@ TEST_CASE("hash<nlohmann::ordered_json>")
 
     // number
     hashes.insert(std::hash<ordered_json> {}(ordered_json(0)));
-    hashes.insert(std::hash<ordered_json> {}(ordered_json(unsigned(0))));
+    hashes.insert(std::hash<ordered_json> {}(ordered_json(static_cast<unsigned>(0))));
 
     hashes.insert(std::hash<ordered_json> {}(ordered_json(-1)));
     hashes.insert(std::hash<ordered_json> {}(ordered_json(0.0)));
