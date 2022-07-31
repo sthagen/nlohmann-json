@@ -15,6 +15,9 @@ SED:=$(shell command -v gsed || which sed)
 # the list of sources in the include folder
 SRCS=$(shell find include -type f | sort)
 
+# the list of sources in the tests folder
+TESTS_SRCS=$(shell find tests -type f \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' \) -not -path 'tests/thirdparty/*' -not -path 'tests/abi/include/nlohmann/*' | sort)
+
 # the single header (amalgamated from the source files)
 AMALGAMATED_FILE=single_include/nlohmann/json.hpp
 
@@ -159,11 +162,11 @@ pretty:
 	    --preserve-date \
 	    --suffix=none \
 	    --formatted \
-	   $(SRCS) $(AMALGAMATED_FILE) tests/src/*.cpp tests/src/*.hpp tests/benchmarks/src/benchmarks.cpp docs/examples/*.cpp
+	   $(SRCS) $(TESTS_SRCS) $(AMALGAMATED_FILE) docs/examples/*.cpp
 
 # call the Clang-Format on all source files
 pretty_format:
-	for FILE in $(SRCS) $(AMALGAMATED_FILE) tests/src/*.cpp tests/src/*.hpp benchmarks/src/benchmarks.cpp docs/examples/*.cpp; do echo $$FILE; clang-format -i $$FILE; done
+	for FILE in $(SRCS) $(TESTS_SRCS) $(AMALGAMATED_FILE) docs/examples/*.cpp; do echo $$FILE; clang-format -i $$FILE; done
 
 # create single header file
 amalgamate: $(AMALGAMATED_FILE)
@@ -265,5 +268,5 @@ serve_header:
 
 reuse:
 	pipx run reuse addheader --recursive single_include include -tjson --license MIT --copyright "Niels Lohmann <https://nlohmann.me>" --year "2013-2022"
-	pipx run reuse addheader tests/benchmarks/src/benchmarks.cpp tests/src/* -tjson_support --license MIT --copyright "Niels Lohmann <https://nlohmann.me>" --year "2013-2022"
+	pipx run reuse addheader $(TESTS_SRCS) --style=c -tjson_support --license MIT --copyright "Niels Lohmann <https://nlohmann.me>" --year "2013-2022"
 	pipx run reuse lint
