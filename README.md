@@ -76,7 +76,7 @@ You can sponsor this library at [GitHub Sponsors](https://github.com/sponsors/nl
 
 ### :office: Corporate Sponsor
 
-[![](https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Codacy-logo-black.svg/320px-Codacy-logo-black.svg.png)](https://github.com/codacy)
+[![](https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/Codacy-logo-black.svg/320px-Codacy-logo-black.svg.png)](https://github.com/codacy/About)
 
 ### :label: Named Sponsors
 
@@ -268,7 +268,7 @@ Note that without appending the `_json` suffix, the passed string literal is not
 value. That is, `json j = "{ \"happy\": true, \"pi\": 3.141 }"` would just store the string
 `"{ "happy": true, "pi": 3.141 }"` rather than parsing the actual object.
 
-The string literal should be brought into scope with with `using namespace nlohmann::literals;`
+The string literal should be brought into scope with `using namespace nlohmann::literals;`
 (see [`json::parse()`](https://json.nlohmann.me/api/operator_literal_json/)).
 
 The above example can also be expressed explicitly using [`json::parse()`](https://json.nlohmann.me/api/basic_json/parse/):
