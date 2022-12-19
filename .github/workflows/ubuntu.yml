@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     container: silkeh/clang:dev
     steps:
-      - name: Install git
-        run: apt-get update ; apt-get install -y git
+      - name: Install git and unzip
+        run: apt-get update ; apt-get install -y git unzip
       - uses: actions/checkout@v3
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@latest
@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ci_cpplint, ci_cmake_flags, ci_reproducible_tests, ci_non_git_tests, ci_offline_testdata]
+        target: [ci_cpplint, ci_reproducible_tests, ci_non_git_tests, ci_offline_testdata]
     steps:
       - uses: actions/checkout@v3
       - name: Get latest CMake and ninja
@@ -72,8 +72,8 @@ jobs:
       matrix:
         target: [ci_clang_tidy, ci_test_clang_sanitizer, ci_clang_analyze]
     steps:
-      - name: Install git
-        run: apt-get update ; apt-get install -y git clang-tools
+      - name: Install git, clang-tools, and unzip
+        run: apt-get update ; apt-get install -y git clang-tools unzip
       - uses: actions/checkout@v3
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@latest
@@ -84,10 +84,13 @@ jobs:
 
   ci_cmake_options:
     runs-on: ubuntu-latest
+    container: ubuntu:focal
     strategy:
       matrix:
-        target: [ci_test_diagnostics, ci_test_noexceptions, ci_test_noimplicitconversions, ci_test_legacycomparison, ci_test_noglobaludls]
+        target: [ci_cmake_flags, ci_test_diagnostics, ci_test_noexceptions, ci_test_noimplicitconversions, ci_test_legacycomparison, ci_test_noglobaludls]
     steps:
+      - name: Install build-essential
+        run: apt-get update ; apt-get install -y build-essential unzip wget git
       - uses: actions/checkout@v3
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@latest
@@ -135,9 +138,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        compiler: ['3.5', '3.6', '3.7', '3.8', '3.9', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', 'latest']
+        compiler: ['3.5', '3.6', '3.7', '3.8', '3.9', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15-bullseye', 'latest']
     container: silkeh/clang:${{ matrix.compiler }}
     steps:
+      - name: Install unzip and git
+        run: apt-get update ; apt-get install -y unzip git
       - uses: actions/checkout@v3
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@latest
