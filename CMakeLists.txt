@@ -57,7 +57,11 @@ endif ()
 ##
 include(GNUInstallDirs)
 
-set(NLOHMANN_JSON_TARGET_NAME               ${PROJECT_NAME})
+if (NOT DEFINED NLOHMANN_JSON_TARGET_NAME)
+    # Allow overriding the target name when using FetchContent / add_subdirectory.
+    set(NLOHMANN_JSON_TARGET_NAME ${PROJECT_NAME})
+endif()
+
 set(NLOHMANN_JSON_CONFIG_INSTALL_DIR        "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}" CACHE INTERNAL "")
 set(NLOHMANN_JSON_INCLUDE_INSTALL_DIR       "${CMAKE_INSTALL_INCLUDEDIR}")
 set(NLOHMANN_JSON_TARGETS_EXPORT_NAME       "${PROJECT_NAME}Targets")
