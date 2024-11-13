@@ -94,14 +94,14 @@ struct Data
     std::string b{}; // NOLINT(readability-redundant-member-init)
 };
 
-void from_json(const json& j, Data& data);
+void from_json(const json& j, Data& data); // NOLINT(misc-use-internal-linkage)
 void from_json(const json& j, Data& data)
 {
     j["a"].get_to(data.a);
     j["b"].get_to(data.b);
 }
 
-bool operator==(Data const& lhs, Data const& rhs);
+bool operator==(Data const& lhs, Data const& rhs); // NOLINT(misc-use-internal-linkage)
 bool operator==(Data const& lhs, Data const& rhs)
 {
     return lhs.a == rhs.a && lhs.b == rhs.b;
@@ -221,7 +221,7 @@ class FooBar
     Foo foo{}; // NOLINT(readability-redundant-member-init)
 };
 
-inline void from_json(const nlohmann::json& j, FooBar& fb)
+inline void from_json(const nlohmann::json& j, FooBar& fb) // NOLINT(misc-use-internal-linkage)
 {
     j.at("value").get_to(fb.foo.value);
 }
@@ -249,7 +249,7 @@ struct for_3171_derived : public for_3171_base
     explicit for_3171_derived(const std::string& /*unused*/) { }
 };
 
-inline void from_json(const json& j, for_3171_base& tb)
+inline void from_json(const json& j, for_3171_base& tb) // NOLINT(misc-use-internal-linkage)
 {
     tb._from_json(j);
 }
@@ -264,7 +264,7 @@ struct for_3312
     std::string name;
 };
 
-inline void from_json(const json& j, for_3312& obj)
+inline void from_json(const json& j, for_3312& obj) // NOLINT(misc-use-internal-linkage)
 {
     j.at("name").get_to(obj.name);
 }

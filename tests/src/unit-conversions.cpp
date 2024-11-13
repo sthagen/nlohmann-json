@@ -1164,7 +1164,7 @@ TEST_CASE("value conversion")
 
             SECTION("non-const")
             {
-                const json j_const = j;
+                const json j_const = j; // NOLINT(performance-unnecessary-copy-initialization)
                 const auto& b = j_const.get_binary();
                 CHECK(*json(b).m_data.m_value.binary == *j.m_data.m_value.binary);
             }
@@ -1513,7 +1513,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(cards,
     {cards::karo, "karo"}
 })
 
-enum TaskState
+enum TaskState // NOLINT(cert-int09-c,readability-enum-initial-value)
 {
     TS_STOPPED,
     TS_RUNNING,

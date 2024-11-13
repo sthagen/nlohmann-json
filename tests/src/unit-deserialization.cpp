@@ -1131,7 +1131,7 @@ TEST_CASE("deserialization")
     }
 }
 
-TEST_CASE_TEMPLATE("deserialization of different character types (ASCII)", T,
+TEST_CASE_TEMPLATE("deserialization of different character types (ASCII)", T, // NOLINT(readability-math-missing-parentheses)
                    char, unsigned char, signed char,
                    wchar_t,
                    char16_t, char32_t,
@@ -1149,7 +1149,7 @@ TEST_CASE_TEMPLATE("deserialization of different character types (ASCII)", T,
     CHECK(l.events == std::vector<std::string>({"boolean(true)"}));
 }
 
-TEST_CASE_TEMPLATE("deserialization of different character types (UTF-8)", T,
+TEST_CASE_TEMPLATE("deserialization of different character types (UTF-8)", T, // NOLINT(readability-math-missing-parentheses)
                    char, unsigned char, std::uint8_t)
 {
     // a star emoji
@@ -1162,7 +1162,7 @@ TEST_CASE_TEMPLATE("deserialization of different character types (UTF-8)", T,
     CHECK(l.events.size() == 1);
 }
 
-TEST_CASE_TEMPLATE("deserialization of different character types (UTF-16)", T,
+TEST_CASE_TEMPLATE("deserialization of different character types (UTF-16)", T, // NOLINT(readability-math-missing-parentheses)
                    char16_t, std::uint16_t)
 {
     // a star emoji
@@ -1175,7 +1175,7 @@ TEST_CASE_TEMPLATE("deserialization of different character types (UTF-16)", T,
     CHECK(l.events.size() == 1);
 }
 
-TEST_CASE_TEMPLATE("deserialization of different character types (UTF-32)", T,
+TEST_CASE_TEMPLATE("deserialization of different character types (UTF-32)", T, // NOLINT(readability-math-missing-parentheses)
                    char32_t, std::uint32_t)
 {
     // a star emoji
