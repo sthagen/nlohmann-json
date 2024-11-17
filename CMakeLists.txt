@@ -210,4 +210,5 @@ if(JSON_Install)
         FILES "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc"
         DESTINATION ${NLOHMANN_JSON_PKGCONFIG_INSTALL_DIR}
     )
+    include(CPack)
 endif()

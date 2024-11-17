@@ -28,9 +28,29 @@ using nlohmann::json;
 #include <unordered_set>
 #include <valarray>
 
+
 // NLOHMANN_JSON_SERIALIZE_ENUM uses a static std::pair
 DOCTEST_CLANG_SUPPRESS_WARNING_PUSH
 DOCTEST_CLANG_SUPPRESS_WARNING("-Wexit-time-destructors")
+
+#if (defined(__cplusplus) && __cplusplus >= 201703L) || (defined(_HAS_CXX17) && _HAS_CXX17 == 1) // fix for issue #464
+    #define JSON_HAS_CPP_17
+    #define JSON_HAS_CPP_14
+#elif (defined(__cplusplus) && __cplusplus >= 201402L) || (defined(_HAS_CXX14) && _HAS_CXX14 == 1)
+    #define JSON_HAS_CPP_14
+#endif
+
+#ifdef JSON_HAS_CPP_17
+    #if __has_include(<optional>)
+        #include <optional>
+    #elif __has_include(<experimental/optional>)
+        #include <experimental/optional>
+    #endif
+#endif
+
+#if defined(JSON_HAS_CPP_17)
+    #include <string_view>
+#endif
 
 TEST_CASE("value conversion")
 {
@@ -153,6 +173,7 @@ TEST_CASE("value conversion")
     }
 
 #if JSON_USE_IMPLICIT_CONVERSIONS
+
     SECTION("get an object (implicit)")
     {
         const json::object_t o_reference = {{"object", json::object()},
@@ -1569,4 +1590,73 @@ TEST_CASE("JSON to enum mapping")
     }
 }
 
+
+#ifdef JSON_HAS_CPP_17
+#ifndef JSON_USE_IMPLICIT_CONVERSIONS
+TEST_CASE("std::optional")
+{
+    SECTION("null")
+    {
+        json j_null;
+        std::optional<std::string> opt_null;
+
+        CHECK(json(opt_null) == j_null);
+        CHECK(j_null.get<std::optional<std::string>>() == std::nullopt);
+    }
+
+    SECTION("string")
+    {
+        json j_string = "string";
+        std::optional<std::string> opt_string = "string";
+
+        CHECK(json(opt_string) == j_string);
+        CHECK(std::optional<std::string>(j_string) == opt_string);
+    }
+
+    SECTION("bool")
+    {
+        json j_bool = true;
+        std::optional<bool> opt_bool = true;
+
+        CHECK(json(opt_bool) == j_bool);
+        CHECK(std::optional<bool>(j_bool) == opt_bool);
+    }
+
+    SECTION("number")
+    {
+        json j_number = 1;
+        std::optional<int> opt_int = 1;
+
+        CHECK(json(opt_int) == j_number);
+        CHECK(j_number.get<std::optional<int>>() == opt_int);
+    }
+
+    SECTION("array")
+    {
+        json j_array = {1, 2, nullptr};
+        std::vector<std::optional<int>> opt_array = {{1, 2, std::nullopt}};
+
+        CHECK(json(opt_array) == j_array);
+        CHECK(j_array.get<std::vector<std::optional<int>>>() == opt_array);
+    }
+
+    SECTION("object")
+    {
+        json j_object = {{"one", 1}, {"two", 2}, {"zero", nullptr}};
+        std::map<std::string, std::optional<int>> opt_object {{"one", 1}, {"two", 2}, {"zero", std::nullopt}};
+
+        CHECK(json(opt_object) == j_object);
+        CHECK(std::map<std::string, std::optional<int>>(j_object) == opt_object);
+    }
+}
+#endif
+#endif
+
+#ifdef JSON_HAS_CPP_17
+    #undef JSON_HAS_CPP_17
+#endif
+
+#ifdef JSON_HAS_CPP_14
+    #undef JSON_HAS_CPP_14
+#endif
 DOCTEST_CLANG_SUPPRESS_WARNING_POP
