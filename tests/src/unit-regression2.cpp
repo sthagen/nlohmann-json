@@ -675,6 +675,7 @@ TEST_CASE("regression tests 2")
     }
 
 #ifdef JSON_HAS_CPP_20
+#ifndef _LIBCPP_VERSION // see https://github.com/nlohmann/json/issues/4490
 #if __has_include(<span>)
     SECTION("issue #2546 - parsing containers of std::byte")
     {
@@ -683,6 +684,7 @@ TEST_CASE("regression tests 2")
         const json j = json::parse(s);
         CHECK(j.dump() == "\"Hello, world!\"");
     }
+#endif
 #endif
 #endif
 

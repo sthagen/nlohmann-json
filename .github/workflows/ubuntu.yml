@@ -25,7 +25,7 @@ jobs:
         run: apt-get update ; apt-get install -y git unzip
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
@@ -79,7 +79,7 @@ jobs:
         run: apt-get update ; apt-get install -y git clang-tools unzip
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
@@ -96,7 +96,7 @@ jobs:
         run: apt-get update ; apt-get install -y build-essential unzip wget git
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
@@ -148,7 +148,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
@@ -165,7 +165,7 @@ jobs:
         run: apt-get update ; apt-get install -y unzip git
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Set env FORCE_STDCPPFS_FLAG for clang 7 / 8 / 9 / 10
         run: echo "JSON_FORCED_GLOBAL_COMPILE_OPTIONS=-DJSON_HAS_FILESYSTEM=0;-DJSON_HAS_EXPERIMENTAL_FILESYSTEM=0" >> "$GITHUB_ENV"
         if: ${{ matrix.compiler == '7' || matrix.compiler == '8' || matrix.compiler == '9' || matrix.compiler == '10' }}
@@ -206,16 +206,21 @@ jobs:
     strategy:
       matrix:
         standard: [11, 14, 17, 20, 23]
+        stdlib: [libcxx, libstdcxx]
     steps:
       - name: Install git and unzip
         run: apt-get update ; apt-get install -y git unzip
       - uses: actions/checkout@v4
       - name: Get latest CMake and ninja
-        uses: lukka/get-cmake@v3.27.7
+        uses: lukka/get-cmake@v3.31.0
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
-      - name: Build
+      - name: Build with libc++
+        run: cmake --build build --target ci_test_clang_libcxx_cxx${{ matrix.standard }}
+        if: ${{ matrix.stdlib == 'libcxx' }}
+      - name: Build with libstdc++
         run: cmake --build build --target ci_test_clang_cxx${{ matrix.standard }}
+        if: ${{ matrix.stdlib == 'libstdcxx' }}
 
   ci_cuda_example:
     runs-on: ubuntu-latest
@@ -231,7 +236,7 @@ jobs:
     runs-on: ubuntu-latest
     container: ghcr.io/nlohmann/json-ci:v2.2.0
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
@@ -243,7 +248,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - name: Install REUSE tool
         run:  python -m pip install reuse
       - name: Run REUSE lint

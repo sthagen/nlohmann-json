@@ -1880,7 +1880,7 @@ TEST_CASE("single CBOR roundtrip")
         {
             SECTION("std::ostringstream")
             {
-                std::basic_ostringstream<std::uint8_t> ss;
+                std::basic_ostringstream<char> ss;
                 json::to_cbor(j1, ss);
                 json j3 = json::from_cbor(ss.str());
                 CHECK(j1 == j3);
