@@ -96,7 +96,6 @@ file(GLOB_RECURSE SRC_FILES ${PROJECT_SOURCE_DIR}/include/nlohmann/*.hpp)
 # -Wno-padded                     We do not care about padding warnings.
 # -Wno-covered-switch-default     All switches list all cases and a default case.
 # -Wno-unsafe-buffer-usage        Otherwise Doctest would not compile.
-# -Wno-weak-vtables               The library is header-only.
 # -Wreserved-identifier           See https://github.com/onqtam/doctest/issues/536.
 
 set(CLANG_CXXFLAGS
@@ -109,7 +108,6 @@ set(CLANG_CXXFLAGS
     -Wno-padded
     -Wno-covered-switch-default
     -Wno-unsafe-buffer-usage
-    -Wno-weak-vtables
     -Wno-reserved-identifier
 )
 
