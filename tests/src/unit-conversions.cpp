@@ -16,6 +16,11 @@
 
 #include "doctest_compatibility.h"
 
+// skip tests if JSON_DisableEnumSerialization=ON (#4384)
+#if defined(JSON_DISABLE_ENUM_SERIALIZATION) && (JSON_DISABLE_ENUM_SERIALIZATION == 1)
+    #define SKIP_TESTS_FOR_ENUM_SERIALIZATION
+#endif
+
 #define JSON_TESTS_PRIVATE
 #include <nlohmann/json.hpp>
 using nlohmann::json;
@@ -1284,6 +1289,7 @@ TEST_CASE("value conversion")
     }
 #endif
 
+#ifndef SKIP_TESTS_FOR_ENUM_SERIALIZATION
     SECTION("get an enum")
     {
         enum c_enum { value_1, value_2 };
@@ -1292,6 +1298,7 @@ TEST_CASE("value conversion")
         CHECK(json(value_1).get<c_enum>() == value_1);
         CHECK(json(cpp_enum::value_1).get<cpp_enum>() == cpp_enum::value_1);
     }
+#endif
 
     SECTION("more involved conversions")
     {

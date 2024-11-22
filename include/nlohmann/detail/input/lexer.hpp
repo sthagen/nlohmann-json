@@ -1256,7 +1256,7 @@ scan_number_done:
             // we checked the number format before
             JSON_ASSERT(endptr == token_buffer.data() + token_buffer.size());
 
-            if (errno == 0)
+            if (errno != ERANGE)
             {
                 value_unsigned = static_cast<number_unsigned_t>(x);
                 if (value_unsigned == x)
@@ -1272,7 +1272,7 @@ scan_number_done:
             // we checked the number format before
             JSON_ASSERT(endptr == token_buffer.data() + token_buffer.size());
 
-            if (errno == 0)
+            if (errno != ERANGE)
             {
                 value_integer = static_cast<number_integer_t>(x);
                 if (value_integer == x)
