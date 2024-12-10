@@ -24,7 +24,7 @@ When executed, this program should create output similar to
     - :octicons-file-24: File issues at the [Homebrew issue tracker](https://github.com/Homebrew/homebrew-core/issues)
     - :octicons-question-24: [Homebrew website](https://brew.sh)
 
-If you are using OS X and [Homebrew](http://brew.sh), you can install the library with
+If you are using [Homebrew](http://brew.sh), you can install the library with
 
 ```sh
 brew install nlohmann-json
