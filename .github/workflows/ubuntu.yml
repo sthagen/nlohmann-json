@@ -9,9 +9,6 @@ on:
   pull_request:
   workflow_dispatch:
   
-permissions:
-  contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
@@ -290,7 +287,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ci_test_examples, ci_test_api_documentation]
+        target: [ci_test_examples, ci_test_build_documentation]
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@0080882f6c36860b6ba35c610c98ce87d4e2f26f # v2.10.2
