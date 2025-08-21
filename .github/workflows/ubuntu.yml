@@ -124,6 +124,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: ${{ github.workspace }}/build/json.info.filtered.noexcept
+          fail-on-error: false
 
   ci_test_compilers_gcc_old:
     runs-on: ubuntu-latest
