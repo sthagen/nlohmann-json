@@ -1118,6 +1118,21 @@ TEST_CASE("regression tests 2")
         const auto decoded = json_4804::from_cbor(data);
         CHECK((decoded == json_4804::array()));
     }
+
+    SECTION("issue #5046 - implicit conversion of return json to std::optional no longer implicit")
+    {
+        const json jval{};
+        auto GetValue = [](const json & valRoot) -> std::optional<json>
+        {
+            if (valRoot.contains("default"))
+            {
+                return valRoot.at("default");
+            }
+            return std::nullopt;
+        };
+        auto result = GetValue(jval);
+        CHECK(!result.has_value());
+    }
 #endif
 }
 
