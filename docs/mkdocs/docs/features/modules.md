@@ -28,6 +28,7 @@ It should be noted that as modules do not export macros, the `nlohmann.json` mod
 
 ## Exported symbols
 Only the following symbols are exported from `nlohmann.json`:
+
 - `nlohmann::adl_serializer`
 - `nlohmann::basic_json`
 - `nlohmann::json`
@@ -37,8 +38,3 @@ Only the following symbols are exported from `nlohmann.json`:
 - `nlohmann::to_string`
 - `nlohmann::literals::json_literals::operator""_json`
 - `nlohmann::literals::json_literals::operator""_json_pointer`
-
-The following specialisations of `std` symbols are also exported:
-- `std::hash`
-- `std::less`
-- `std::swap`
