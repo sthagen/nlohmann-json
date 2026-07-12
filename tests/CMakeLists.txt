@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.13...3.14)
+cmake_minimum_required(VERSION 3.13...4.0)
 
 option(JSON_Valgrind    "Execute test suite with Valgrind." OFF)
 option(JSON_FastTests   "Skip expensive/slow tests." OFF)
@@ -63,12 +63,16 @@ target_compile_definitions(test_main PUBLIC
     JSON_TEST_USING_MULTIPLE_HEADERS=$<BOOL:${JSON_MultipleHeaders}>)
 target_compile_features(test_main PRIVATE cxx_std_11)
 target_compile_options(test_main PUBLIC
-    $<$<CXX_COMPILER_ID:MSVC>:/EHsc;$<$<CONFIG:Release>:/Od>>
+    $<$<CXX_COMPILER_ID:MSVC>:/EHsc>
     # MSVC: Force to always compile with W4
     #       Disable warning C4566: character represented by universal-character-name '\uFF01'
     #                              cannot be represented in the current code page (1252)
     #       Disable warning C4996: 'nlohmann::basic_json<...>::operator <<': was declared deprecated
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /wd4566 /wd4996>
+    #       Disable warning C4702: unreachable code; wide_string_input_adapter::get_elements()
+    #                              is annotated JSON_HEDLEY_NO_RETURN (it always throws), which
+    #                              makes MSVC flag the code following its call in binary_reader.hpp
+    #                              as unreachable for that instantiation, in both Debug and Release
+    $<$<CXX_COMPILER_ID:MSVC>:/W4;/wd4566;/wd4996;/wd4702>
     # https://github.com/nlohmann/json/issues/1114
     $<$<CXX_COMPILER_ID:MSVC>:/bigobj> $<$<BOOL:${MINGW}>:-Wa,-mbig-obj>
 
@@ -148,9 +152,9 @@ message(STATUS "${msg}")
 # *DO* use json_test_set_test_options() above this line
 
 json_test_should_build_32bit_test(json_32bit_test json_32bit_test_only "${JSON_32bitTest}")
-file(GLOB files src/unit-*.cpp)
+file(GLOB files CONFIGURE_DEPENDS src/unit-*.cpp)
 if(json_32bit_test_only)
-    set(files src/unit-32bit.cpp)    
+    set(files src/unit-32bit.cpp)
 elseif(NOT json_32bit_test)
     list(FILTER files EXCLUDE REGEX src/unit-32bit.cpp)
 endif()
@@ -195,3 +199,18 @@ add_subdirectory(cmake_add_subdirectory)
 add_subdirectory(cmake_fetch_content)
 add_subdirectory(cmake_fetch_content2)
 add_subdirectory(cmake_target_include_directories)
+
+# fmt (fetched by tests/fmt_formatter) requires a genuinely modern, C++17-capable
+# toolchain; skip it on legacy/niche toolchains where fmt itself is known not to build
+set(JSON_FMT_FORMATTER_TEST_SUPPORTED ${compiler_supports_cpp_17})
+# fmt 12's 128-bit integer emulation does not build with 32-bit MinGW
+if (MINGW AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    set(JSON_FMT_FORMATTER_TEST_SUPPORTED FALSE)
+endif()
+# the MSVC STL rejects Clang versions older than 19 as a host compiler
+if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19.0)
+    set(JSON_FMT_FORMATTER_TEST_SUPPORTED FALSE)
+endif()
+if (JSON_FMT_FORMATTER_TEST_SUPPORTED)
+    add_subdirectory(fmt_formatter)
+endif()

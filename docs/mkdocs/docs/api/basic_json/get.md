@@ -88,6 +88,11 @@ constexpr const PointerType get_ptr() const noexcept;
 
 Depends on what `json_serializer<ValueType>` `from_json()` method throws
 
+## Complexity
+
+Depends on the `json_serializer<ValueType>::from_json()` implementation for overloads (1) and (2); constant for
+overload (3).
+
 ## Notes
 
 !!! danger "Undefined behavior for pointers"
@@ -108,6 +113,13 @@ Depends on what `json_serializer<ValueType>` `from_json()` method throws
 
     See [Number conversion](../../features/types/number_handling.md#number-conversion)
     for more information.
+
+!!! note "`std::optional` conversions"
+
+    Prior to version 3.13.0, `#!cpp get<std::optional<T>>()` (and other conversions to `std::optional<T>`) failed to
+    compile in every configuration, due to an internal implementation bug that made the `from_json` overload for
+    `std::optional` unreachable regardless of the [`JSON_USE_IMPLICIT_CONVERSIONS`](../macros/json_use_implicit_conversions.md)
+    setting. This has been fixed.
 
 ## Examples
 
@@ -143,6 +155,14 @@ Depends on what `json_serializer<ValueType>` `from_json()` method throws
     ```json
     --8<-- "examples/get__PointerType.output"
     ```
+
+## See also
+
+- [get_to](get_to.md) convert and write into a passed value
+- [get_ptr](get_ptr.md) get a pointer to the stored value
+- [get_ref](get_ref.md) get a reference to the stored value
+- [operator ValueType](operator_ValueType.md) get a value via implicit conversion
+- [Converting values](../../features/conversions.md) - the type conversions article
 
 ## Version history
 

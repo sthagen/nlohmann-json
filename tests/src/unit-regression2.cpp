@@ -66,6 +66,21 @@ using ordered_json = nlohmann::ordered_json;
     #endif
 #endif
 
+/////////////////////////////////////////////////////////////////////
+// for #4825 - explicitly instantiating basic_json must compile; this
+// forces instantiation of binary_writer::write_bjdata_ndarray, whose
+// static_cast<string_t> was ambiguous under explicit instantiation on
+// C++17. Merely compiling this translation unit is the regression test.
+/////////////////////////////////////////////////////////////////////
+template class nlohmann::basic_json<>;
+
+/////////////////////////////////////////////////////////////////////
+// for #4440
+/////////////////////////////////////////////////////////////////////
+#if JSON_HAS_RANGES == 1
+    #include <ranges>
+#endif
+
 // NLOHMANN_JSON_SERIALIZE_ENUM uses a static std::pair
 DOCTEST_CLANG_SUPPRESS_WARNING_PUSH
 DOCTEST_CLANG_SUPPRESS_WARNING("-Wexit-time-destructors")
@@ -783,7 +798,9 @@ TEST_CASE("regression tests 2")
 
 #ifdef JSON_HAS_CPP_20
 #ifndef _LIBCPP_VERSION // see https://github.com/nlohmann/json/issues/4490
-#if __has_include(<span>)
+    // classic Intel ICC reports <span> as includable but cannot actually compile
+    // std::span/std::as_bytes usage below
+#if __has_include(<span>) && !defined(__ICC) && !defined(__INTEL_COMPILER)
     SECTION("issue #2546 - parsing containers of std::byte")
     {
         const char DATA[] = R"("Hello, world!")"; // NOLINT(misc-const-correctness,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
@@ -1119,6 +1136,40 @@ TEST_CASE("regression tests 2")
         CHECK((decoded == json_4804::array()));
     }
 
+    SECTION("discussion #4209 - custom BinaryType direct assignment and round-tripping")
+    {
+        // Test that assigning a custom BinaryType directly creates a binary value, not an array
+        const std::vector<std::byte> original{std::byte{1}, std::byte{2}, std::byte{3}};
+        const json_4804 j = original;
+        CHECK(j.is_binary());
+        CHECK(!j.is_array());
+
+        // Test round-tripping: extracting the binary value back as the custom container type
+        const auto extracted = j.get<std::vector<std::byte>>();
+        CHECK(extracted == original);
+
+        // Test that the default json alias behavior is unchanged: std::vector<uint8_t> -> array
+        const json default_json = std::vector<std::uint8_t> {1, 2, 3};
+        CHECK(default_json.is_array());
+        CHECK(!default_json.is_binary());
+    }
+
+    SECTION("discussion #4209 - custom BinaryType extraction from parsed array")
+    {
+        // Test that extracting a custom BinaryType from a parsed JSON array still works
+        // (not just from a binary-typed node)
+        const auto j = json_4804::parse("[1,2,3]");
+        CHECK(j.is_array());
+        CHECK(!j.is_binary());
+
+        // Extracting as custom BinaryType should work from arrays
+        const auto extracted = j.get<std::vector<std::byte>>();
+        CHECK(extracted.size() == 3);
+        CHECK(extracted[0] == std::byte{1});
+        CHECK(extracted[1] == std::byte{2});
+        CHECK(extracted[2] == std::byte{3});
+    }
+
     SECTION("issue #5046 - implicit conversion of return json to std::optional no longer implicit")
     {
         const json jval{};
@@ -1132,6 +1183,60 @@ TEST_CASE("regression tests 2")
         };
         auto result = GetValue(jval);
         CHECK(!result.has_value());
+    }
+#endif
+
+#if JSON_HAS_RANGES == 1
+    SECTION("issue #4440 - assert when using std::views::filter and GCC 10")
+    {
+        auto noOpFilter = std::views::filter([](auto&&) noexcept
+        {
+            return true;
+        });
+        json j = {1, 2, 3};
+        auto filtered = j | noOpFilter;
+        CHECK(*filtered.begin() == 1);
+    }
+#endif
+
+#if JSON_HAS_RANGES && !defined(__MINGW32__)
+    SECTION("issue #4916 - constructing array from C++20 ranges view does not work")
+    {
+        std::vector<int> nums{1, 2, 37, 42, 21};
+        auto filteredNums = nums | std::views::filter([](int i)
+        {
+            return i > 10;
+        });
+        json const j(filteredNums);
+        CHECK(j.type() == json::value_t::array);
+        CHECK(j == json({37, 42, 21}));
+    }
+#endif
+
+    // owning_view is not available in libstdc++ < 12
+#if JSON_HAS_RANGES && !defined(__MINGW32__) && !(defined(__GLIBCXX__) && _GLIBCXX_RELEASE < 12)
+    SECTION("issue #4916 - constructing array from prvalue C++20 ranges view (owning_view)")
+    {
+        json const j(std::vector<int> {1, 2, 37, 42, 21} | std::views::filter([](int i)
+        {
+            return i > 10;
+        }));
+        CHECK(j.type() == json::value_t::array);
+        CHECK(j == json({37, 42, 21}));
+    }
+#endif
+
+#if JSON_HAS_RANGES && !defined(__MINGW32__)
+    SECTION("issue #4916 - constructing array from C++20 transform view (prvalue elements)")
+    {
+        std::vector<int> nums{1, 2, 3};
+        auto t = nums | std::views::transform([](int i) noexcept
+        {
+            return i * 2;
+        });
+        json const j(t);
+        CHECK(j.type() == json::value_t::array);
+        CHECK(j == json({2, 4, 6}));
     }
 #endif
 }
@@ -1327,6 +1432,102 @@ TEST_CASE("regression test #5122 - nlohmann::ordered_map move-assignment transfe
     src.emplace("after-move", "3");
     REQUIRE(src.size() == 1);
     CHECK(src.begin()->first == "after-move");
+}
+
+// Stand-in for a third-party library (e.g., Eigen as of 3.4, which added
+// STL-compatible begin()/end() to its vector types), living in its own
+// namespace with its own to_json overload for its vector type.
+namespace issue_4320_eigen
+{
+// "array-compatible" from the library's point of view (it has begin()/end()),
+// but for which this (fake) third-party namespace provides its own to_json.
+struct vector3
+{
+    double v[3]; // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-use-default-member-init,modernize-use-default-member-init)
+    vector3(double x, double y, double z) : v{x, y, z} {} // NOLINT(hicpp-member-init,cppcoreguidelines-pro-type-member-init)
+    double x() const
+    {
+        return v[0];
+    }
+    double y() const
+    {
+        return v[1];
+    }
+    double z() const
+    {
+        return v[2];
+    }
+    double* begin()
+    {
+        return v;
+    }
+    double* end()
+    {
+        return v + 3;
+    }
+    const double* begin() const
+    {
+        return v;
+    }
+    const double* end() const
+    {
+        return v + 3;
+    }
+};
+
+inline void to_json(json& j, const vector3& v) // NOLINT(misc-use-internal-linkage)
+{
+    j = {{"x", v.x()}, {"y", v.y()}, {"z", v.z()}};
+}
+} // namespace issue_4320_eigen
+
+// The user's own namespace, using the (fake) Eigen type as an implementation
+// detail behind a payload type that has nothing to do with vectors/arrays.
+namespace issue_4320
+{
+// Publicly derives from issue_4320_eigen::vector3 but does *not* define its
+// own to_json - it is only ever used as a temporary to reach the base
+// class's to_json via ADL.
+struct vector3_wrapper : issue_4320_eigen::vector3
+{
+    using issue_4320_eigen::vector3::vector3;
+};
+
+struct payload
+{
+    double x, y, z;
+};
+
+inline vector3_wrapper to_eigen(const payload& p) // NOLINT(misc-use-internal-linkage)
+{
+    return {p.x, p.y, p.z};
+}
+
+inline void to_json(json& j, const payload& p) // NOLINT(misc-use-internal-linkage)
+{
+    // Unqualified call, passing a *derived* vector3_wrapper: relies on ADL
+    // finding issue_4320_eigen::to_json(json&, const vector3&) through the
+    // vector3 base class, via a derived-to-base conversion. Must NOT resolve
+    // to the library's own generic array-compatible to_json (an exact-match
+    // template for vector3_wrapper, since it also has begin()/end()), which
+    // would serialize this as [x, y, z] instead of {"x":x, "y":y, "z":z}.
+    to_json(j, to_eigen(p));
+}
+} // namespace issue_4320
+
+TEST_CASE("issue #4320 - custom base class must not leak nlohmann::detail into ADL")
+{
+    // Before the fix, basic_json unconditionally derived from a type living in
+    // nlohmann::detail (json_default_base), which made nlohmann::detail an
+    // associated namespace of every basic_json for ADL purposes. That leaked
+    // the library's internal generic-array to_json overload into unqualified
+    // to_json() calls made from user code, silently bypassing user-defined
+    // to_json overloads reached via a derived-to-base conversion.
+    const issue_4320::payload p{1.0, 2.0, 3.0};
+
+    json j;
+    to_json(j, p);
+    CHECK(j == json({{"x", 1.0}, {"y", 2.0}, {"z", 3.0}}));
 }
 
 DOCTEST_CLANG_SUPPRESS_WARNING_POP

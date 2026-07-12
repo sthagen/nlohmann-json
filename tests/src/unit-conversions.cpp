@@ -1761,16 +1761,42 @@ TEST_CASE("std::filesystem::path")
 }
 #endif
 
-#if !JSON_USE_IMPLICIT_CONVERSIONS
 TEST_CASE("std::optional")
 {
     SECTION("null")
     {
-        json j_null;
-        std::optional<std::string> opt_null;
+        const json j_null;
+        const std::optional<std::string> opt_null;
 
         CHECK(json(opt_null) == j_null);
         CHECK(j_null.get<std::optional<std::string>>() == std::nullopt);
+
+        // Constructing std::optional<T> directly from JSON null throws because
+        // std::optional's own converting constructor is chosen over basic_json's
+        // operator T(). This is a language-level limitation (std::optional<T> is
+        // constructible from T, and T is constructible from basic_json via the
+        // operator); there is no SFINAE path that distinguishes "call from inside
+        // std::optional's constructor" from "direct call". Use get<std::optional<T>>()
+        // or get_to() instead for correct null handling. See #4864 and #5246.
+        CHECK_THROWS_WITH_AS(std::optional<std::string>(j_null),
+                             "[json.exception.type_error.302] type must be string, but is null", json::type_error&);
+        CHECK_THROWS_WITH_AS(std::optional<int>(j_null),
+                             "[json.exception.type_error.302] type must be number, but is null", json::type_error&);
+
+        // Assignment goes through the same overload resolution as direct
+        // construction, so it throws for the same reason. This relies on
+        // basic_json's implicit conversion operator, so it only applies
+        // when JSON_USE_IMPLICIT_CONVERSIONS is enabled (the default).
+#if JSON_USE_IMPLICIT_CONVERSIONS
+        std::optional<std::string> opt_assign;
+        CHECK_THROWS_WITH_AS(opt_assign = j_null,
+                             "[json.exception.type_error.302] type must be string, but is null", json::type_error&);
+#endif
+
+        // get_to() is the correct way to obtain std::nullopt from a JSON null.
+        std::optional<std::string> opt_get_to = "placeholder";
+        j_null.get_to(opt_get_to);
+        CHECK(opt_get_to == std::nullopt);
     }
 
     SECTION("string")
@@ -1818,7 +1844,6 @@ TEST_CASE("std::optional")
         CHECK(std::map<std::string, std::optional<int>>(j_object) == opt_object);
     }
 }
-#endif
 #endif
 
 #ifdef JSON_HAS_CPP_17
