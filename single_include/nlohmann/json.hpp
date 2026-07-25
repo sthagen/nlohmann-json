@@ -7382,17 +7382,30 @@ struct wide_string_input_helper<BaseInputAdapter, 2>
             }
             else
             {
-                if (JSON_HEDLEY_UNLIKELY(!input.empty()))
+                // A supplementary code point is a high surrogate (0xD800..0xDBFF)
+                // followed by a low surrogate (0xDC00..0xDFFF). A lone low
+                // surrogate, a high surrogate at the end of the input, or a high
+                // surrogate followed by any other unit is malformed UTF-16. In
+                // that case the offending unit is passed through unchanged so the
+                // UTF-8 decoder rejects it, matching how \uXXXX surrogate escapes
+                // are handled in the lexer.
+                bool valid_pair = false;
+                if (wc <= 0xDBFF && JSON_HEDLEY_UNLIKELY(!input.empty()))
                 {
                     const auto wc2 = static_cast<unsigned int>(input.get_character());
-                    const auto charcode = 0x10000u + (((static_cast<unsigned int>(wc) & 0x3FFu) << 10u) | (wc2 & 0x3FFu));
-                    utf8_bytes[0] = static_cast<std::char_traits<char>::int_type>(0xF0u | (charcode >> 18u));
-                    utf8_bytes[1] = static_cast<std::char_traits<char>::int_type>(0x80u | ((charcode >> 12u) & 0x3Fu));
-                    utf8_bytes[2] = static_cast<std::char_traits<char>::int_type>(0x80u | ((charcode >> 6u) & 0x3Fu));
-                    utf8_bytes[3] = static_cast<std::char_traits<char>::int_type>(0x80u | (charcode & 0x3Fu));
-                    utf8_bytes_filled = 4;
+                    if (0xDC00 <= wc2 && wc2 <= 0xDFFF)
+                    {
+                        const auto charcode = 0x10000u + (((static_cast<unsigned int>(wc) & 0x3FFu) << 10u) | (wc2 & 0x3FFu));
+                        utf8_bytes[0] = static_cast<std::char_traits<char>::int_type>(0xF0u | (charcode >> 18u));
+                        utf8_bytes[1] = static_cast<std::char_traits<char>::int_type>(0x80u | ((charcode >> 12u) & 0x3Fu));
+                        utf8_bytes[2] = static_cast<std::char_traits<char>::int_type>(0x80u | ((charcode >> 6u) & 0x3Fu));
+                        utf8_bytes[3] = static_cast<std::char_traits<char>::int_type>(0x80u | (charcode & 0x3Fu));
+                        utf8_bytes_filled = 4;
+                        valid_pair = true;
+                    }
                 }
-                else
+
+                if (!valid_pair)
                 {
                     utf8_bytes[0] = static_cast<std::char_traits<char>::int_type>(wc);
                     utf8_bytes_filled = 1;
@@ -10700,11 +10713,38 @@ class binary_reader
     //////////
 
     /*!
+    @brief Validate a BSON document's declared size against the bytes read.
+
+    A BSON document starts with an int32 that counts its own total length in
+    bytes, including that prefix and the trailing 0x00. The reader is driven
+    by the terminator rather than the declared length, so without this check a
+    nested document could declare a length that disagrees with where its
+    terminator actually falls and quietly hand the bytes in between to the
+    enclosing document. A well-formed document is at least 5 bytes (the prefix
+    plus the terminator); the equality also rejects those impossible sizes,
+    since at least 5 bytes are always consumed.
+
+    @param[in] document_start  value of chars_read before the size prefix
+    @param[in] document_size   the declared document size
+    @return whether the declared size matches the number of bytes read
+    */
+    bool check_bson_document_size(const std::size_t document_start, const std::int32_t document_size)
+    {
+        if (JSON_HEDLEY_UNLIKELY(document_size < 0 || static_cast<std::size_t>(document_size) != chars_read - document_start))
+        {
+            return sax->parse_error(chars_read, get_token_string(), parse_error::create(112, chars_read,
+                                    exception_message(input_format_t::bson, concat("document size ", std::to_string(document_size), " does not match the number of bytes read (", std::to_string(chars_read - document_start), ")"), "document"), nullptr));
+        }
+        return true;
+    }
+
+    /*!
     @brief Reads in a BSON-object and passes it to the SAX-parser.
     @return whether a valid BSON-value was passed to the SAX parser
     */
     bool parse_bson_internal()
     {
+        const std::size_t document_start = chars_read;
         std::int32_t document_size{};
         get_number<std::int32_t, true>(input_format_t::bson, document_size);
 
@@ -10714,6 +10754,11 @@ class binary_reader
         }
 
         if (JSON_HEDLEY_UNLIKELY(!parse_bson_element_list(/*is_array*/false)))
+        {
+            return false;
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(!check_bson_document_size(document_start, document_size)))
         {
             return false;
         }
@@ -10933,6 +10978,7 @@ class binary_reader
     */
     bool parse_bson_array()
     {
+        const std::size_t document_start = chars_read;
         std::int32_t document_size{};
         get_number<std::int32_t, true>(input_format_t::bson, document_size);
 
@@ -10942,6 +10988,11 @@ class binary_reader
         }
 
         if (JSON_HEDLEY_UNLIKELY(!parse_bson_element_list(/*is_array*/true)))
+        {
+            return false;
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(!check_bson_document_size(document_start, document_size)))
         {
             return false;
         }
@@ -12383,6 +12434,29 @@ class binary_reader
     }
 
     /*!
+    @brief reject a negative UBJSON/BJData string length
+
+    String and key lengths are written with signed integer markers (i, I, l,
+    L). A negative value is malformed; without this check get_string() would
+    silently treat it as an empty string and leave the following bytes to be
+    misread as the next value. This mirrors the non-negative check the
+    optimized-container count path already performs in get_ubjson_size_value.
+
+    @param[in] len  the string length read from the input
+    @return whether the length is valid (non-negative)
+    */
+    template<typename NumberType>
+    bool check_ubjson_string_length(const NumberType len)
+    {
+        if (JSON_HEDLEY_UNLIKELY(len < 0))
+        {
+            return sax->parse_error(chars_read, get_token_string(), parse_error::create(113, chars_read,
+                                    exception_message(input_format, "string length must not be negative", "string"), nullptr));
+        }
+        return true;
+    }
+
+    /*!
     @brief reads a UBJSON string
 
     This function is either called after reading the 'S' byte explicitly
@@ -12419,25 +12493,25 @@ class binary_reader
             case 'i':
             {
                 std::int8_t len{};
-                return get_number(input_format, len) && get_string(input_format, len, result);
+                return get_number(input_format, len) && check_ubjson_string_length(len) && get_string(input_format, len, result);
             }
 
             case 'I':
             {
                 std::int16_t len{};
-                return get_number(input_format, len) && get_string(input_format, len, result);
+                return get_number(input_format, len) && check_ubjson_string_length(len) && get_string(input_format, len, result);
             }
 
             case 'l':
             {
                 std::int32_t len{};
-                return get_number(input_format, len) && get_string(input_format, len, result);
+                return get_number(input_format, len) && check_ubjson_string_length(len) && get_string(input_format, len, result);
             }
 
             case 'L':
             {
                 std::int64_t len{};
-                return get_number(input_format, len) && get_string(input_format, len, result);
+                return get_number(input_format, len) && check_ubjson_string_length(len) && get_string(input_format, len, result);
             }
 
             case 'u':
