@@ -291,15 +291,19 @@ A JSON Pointer array index must be a number.
 
 ### json.exception.parse_error.110
 
-When parsing CBOR or MessagePack, the byte vector ends before the complete value has been read.
+When parsing a [binary format](../features/binary_formats/index.md), the byte vector ends before the complete value has
+been read.
 
-!!! failure "Example message"
+!!! failure "Example messages"
 
     ```
     [json.exception.parse_error.110] parse error at byte 5: syntax error while parsing CBOR string: unexpected end of input
     ```
     ```
     [json.exception.parse_error.110] parse error at byte 2: syntax error while parsing UBJSON value: expected end of input; last byte: 0x5A
+    ```
+    ```
+    [json.exception.parse_error.110] parse error at byte 8: syntax error while parsing BSON number: unexpected end of input
     ```
 
 ### json.exception.parse_error.112
@@ -329,10 +333,14 @@ An unexpected byte was read in a [binary format](../features/binary_formats/inde
     ```
     [json.exception.parse_error.112] parse error at byte 9: syntax error while parsing CBOR value: negative integer overflow
     ```
+    ```
+    [json.exception.parse_error.112] parse error at byte 5: syntax error while parsing BSON document: document size 6 does not match the number of bytes read (5)
+    ```
 
 ### json.exception.parse_error.113
 
-While parsing a map key, a value that is not a string has been read.
+A string could not be read from a [binary format](../features/binary_formats/index.md): either a value that is not a
+string was read where one was required (for instance as a map key), or the string's length specification is invalid.
 
 !!! failure "Example messages"
 
@@ -344,6 +352,9 @@ While parsing a map key, a value that is not a string has been read.
     ```
     ```
     [json.exception.parse_error.113] parse error at byte 2: syntax error while parsing UBJSON char: byte after 'C' must be in range 0x00..0x7F; last byte: 0x82
+    ```
+    ```
+    [json.exception.parse_error.113] parse error at byte 3: syntax error while parsing BJData string: string length must not be negative
     ```
 
 ### json.exception.parse_error.114
@@ -853,12 +864,20 @@ and this exception no longer occurs.
 
 ### json.exception.out_of_range.408
 
-The size (following `#`) of an UBJSON array or object exceeds the maximal capacity.
+The size of an array or object in a [binary format](../features/binary_formats/index.md) exceeds the maximal capacity:
+the size following `#` for [UBJSON](../features/binary_formats/ubjson.md)/[BJData](../features/binary_formats/bjdata.md),
+or the encoded length for [CBOR](../features/binary_formats/cbor.md).
 
-!!! failure "Example message"
+!!! failure "Example messages"
 
     ```
     excessive array size: 8658170730974374167
+    ```
+    ```
+    [json.exception.out_of_range.408] syntax error while parsing CBOR size: excessive array size
+    ```
+    ```
+    [json.exception.out_of_range.408] syntax error while parsing CBOR size: excessive map size
     ```
 
 ### json.exception.out_of_range.409
@@ -897,6 +916,22 @@ A JSON Patch `add` operation cannot be applied because the target location's par
 !!! note
 
     This exception was added in version 3.13.0. Before that, this situation hit an internal assertion (aborting the program in debug builds) or was silently ignored when assertions were disabled.
+
+### json.exception.out_of_range.412
+
+BSON stores the length of documents, arrays, strings, and binary values in a signed 32-bit integer. This exception is thrown when a value is too large to be described by such a length field.
+
+!!! failure "Example message"
+
+    ```
+    BSON length 2147483661 exceeds maximum of 2147483647
+    ```
+
+!!! note
+
+    This exception was added in version 3.13.0. Before that, the length was silently truncated, and
+    [`to_bson`](../api/basic_json/to_bson.md) produced documents with negative length prefixes that
+    [`from_bson`](../api/basic_json/from_bson.md) rejected.
 
 ## Further exceptions
 

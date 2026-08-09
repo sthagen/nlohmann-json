@@ -370,8 +370,10 @@ class json_sax_dom_parser
 
                 case value_t::string:
                 {
-                    // include the length of the quotes, which is 2
-                    v.start_position = v.end_position - v.m_data.m_value.string->size() - 2;
+                    // escape sequences make the token longer than the value it
+                    // parses to, so the start position cannot be derived from
+                    // the value; use the offset the lexer recorded instead
+                    v.start_position = m_lexer_ref->get_token_start_position();
                     break;
                 }
 
@@ -626,14 +628,7 @@ class json_sax_dom_callback_parser
         if (!ref_stack.empty() && ref_stack.back() && ref_stack.back()->is_structured())
         {
             // remove discarded value
-            for (auto it = ref_stack.back()->begin(); it != ref_stack.back()->end(); ++it)
-            {
-                if (it->is_discarded())
-                {
-                    ref_stack.back()->erase(it);
-                    break;
-                }
-            }
+            remove_discarded_value(*ref_stack.back());
         }
 
         return true;
@@ -674,8 +669,9 @@ class json_sax_dom_callback_parser
     bool end_array()
     {
         bool keep = true;
+        const bool stored = ref_stack.back() != nullptr;
 
-        if (ref_stack.back())
+        if (stored)
         {
             keep = callback(static_cast<int>(ref_stack.size()) - 1, parse_event_t::array_end, *ref_stack.back());
             if (keep)
@@ -709,9 +705,19 @@ class json_sax_dom_callback_parser
         keep_stack.pop_back();
 
         // remove discarded value
-        if (!keep && !ref_stack.empty() && ref_stack.back()->is_array())
+        if (!ref_stack.empty() && ref_stack.back())
         {
-            ref_stack.back()->m_data.m_value.array->pop_back();
+            if (!keep && ref_stack.back()->is_array())
+            {
+                ref_stack.back()->m_data.m_value.array->pop_back();
+            }
+            else if ((!keep || !stored) && ref_stack.back()->is_object())
+            {
+                // the array is either still stored under its key or was never
+                // stored, leaving the placeholder key() wrote; both show up as
+                // a discarded member of the parent object
+                remove_discarded_value(*ref_stack.back());
+            }
         }
 
         return true;
@@ -765,8 +771,10 @@ class json_sax_dom_callback_parser
 
                 case value_t::string:
                 {
-                    // include the length of the quotes, which is 2
-                    v.start_position = v.end_position - v.m_data.m_value.string->size() - 2;
+                    // escape sequences make the token longer than the value it
+                    // parses to, so the start position cannot be derived from
+                    // the value; use the offset the lexer recorded instead
+                    v.start_position = m_lexer_ref->get_token_start_position();
                     break;
                 }
 
@@ -800,6 +808,19 @@ class json_sax_dom_callback_parser
         }
     }
 #endif
+
+    /// remove the discarded value the callback rejected from its parent
+    static void remove_discarded_value(BasicJsonType& parent)
+    {
+        for (auto it = parent.begin(); it != parent.end(); ++it)
+        {
+            if (it->is_discarded())
+            {
+                parent.erase(it);
+                break;
+            }
+        }
+    }
 
     /*!
     @param[in] v  value to add to the JSON value we build during parsing
@@ -841,6 +862,18 @@ class json_sax_dom_callback_parser
         // do not handle this value if we just learnt it shall be discarded
         if (!keep)
         {
+            // if the value was to become an object member, key() already
+            // stored a placeholder for it that has to be removed again
+            if (!ref_stack.empty() && ref_stack.back() && ref_stack.back()->is_object())
+            {
+                JSON_ASSERT(!key_keep_stack.empty());
+                const bool placeholder_stored = key_keep_stack.back();
+                key_keep_stack.pop_back();
+                if (placeholder_stored)
+                {
+                    remove_discarded_value(*ref_stack.back());
+                }
+            }
             return {false, nullptr};
         }
 
