@@ -11395,7 +11395,13 @@ class binary_reader
             case 0xBF: // map (indefinite length)
                 return get_cbor_object(detail::unknown_size(), tag_handler);
 
-            case 0xC6: // tagged item
+            case 0xC0: // tagged item
+            case 0xC1:
+            case 0xC2:
+            case 0xC3:
+            case 0xC4:
+            case 0xC5:
+            case 0xC6:
             case 0xC7:
             case 0xC8:
             case 0xC9:
@@ -11410,6 +11416,9 @@ class binary_reader
             case 0xD2:
             case 0xD3:
             case 0xD4:
+            case 0xD5:
+            case 0xD6:
+            case 0xD7:
             case 0xD8: // tagged item (1 byte follows)
             case 0xD9: // tagged item (2 bytes follow)
             case 0xDA: // tagged item (4 bytes follow)
@@ -17747,7 +17756,10 @@ class binary_writer
                 bool prefix_required = true;
                 if (use_type && !j.m_data.m_value.array->empty())
                 {
-                    JSON_ASSERT(use_count);
+                    if (!use_count)
+                    {
+                        JSON_THROW(other_error::create(502, "use_type requires use_size = true", &j));
+                    }
                     const CharType first_prefix = ubjson_prefix(j.front(), use_bjdata);
                     const bool same_prefix = std::all_of(j.begin() + 1, j.end(),
                                                          [this, first_prefix, use_bjdata](const BasicJsonType & v)
@@ -17793,7 +17805,10 @@ class binary_writer
 
                 if (use_type && (bjdata_draft3 || !j.m_data.m_value.binary->empty()))
                 {
-                    JSON_ASSERT(use_count);
+                    if (!use_count)
+                    {
+                        JSON_THROW(other_error::create(502, "use_type requires use_size = true", &j));
+                    }
                     oa->write_character(to_char_type('$'));
                     oa->write_character(bjdata_draft3 ? 'B' : 'U');
                 }
@@ -17845,7 +17860,10 @@ class binary_writer
                 bool prefix_required = true;
                 if (use_type && !j.m_data.m_value.object->empty())
                 {
-                    JSON_ASSERT(use_count);
+                    if (!use_count)
+                    {
+                        JSON_THROW(other_error::create(502, "use_type requires use_size = true", &j));
+                    }
                     const CharType first_prefix = ubjson_prefix(j.front(), use_bjdata);
                     const bool same_prefix = std::all_of(j.begin(), j.end(),
                                                          [this, first_prefix, use_bjdata](const BasicJsonType & v)
@@ -24852,7 +24870,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             if (merge_objects && it.value().is_object())
             {
                 auto it2 = m_data.m_value.object->find(it.key());
-                if (it2 != m_data.m_value.object->end())
+                // Only recurse when the existing value is itself an object.
+                // Otherwise overwrite, matching the documented "all other values
+                // are overwritten as usual" behavior (see #5402).
+                if (it2 != m_data.m_value.object->end() && it2->second.is_object())
                 {
                     it2->second.update(it.value(), true);
 #if JSON_DIAGNOSTICS
