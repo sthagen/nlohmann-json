@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm> // min
 #include <cstddef>
 #include <string> // string
 #include <type_traits> // enable_if_t
@@ -222,12 +223,16 @@ class json_sax_dom_parser
 
     bool string(string_t& val)
     {
-        handle_value(val);
+        // json_sax documents that the passed value may be moved from,
+        // so hand the buffer over instead of copying it
+        handle_value(std::move(val));
         return true;
     }
 
     bool binary(binary_t& val)
     {
+        // json_sax documents that the passed value may be moved from,
+        // so hand the buffer over instead of copying it
         handle_value(std::move(val));
         return true;
     }
@@ -299,6 +304,16 @@ class json_sax_dom_parser
         if (JSON_HEDLEY_UNLIKELY(len != detail::unknown_size() && len > ref_stack.back()->max_size()))
         {
             JSON_THROW(out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
+        }
+
+        if (len != detail::unknown_size())
+        {
+            // reserve upfront to avoid repeated reallocations while adding elements,
+            // but cap the reservation so a bogus/hostile length (which is not bounded
+            // by max_size(), unlike e.g. std::vector) cannot trigger an oversized
+            // allocation for a small or truncated input
+            constexpr std::size_t reserve_cap = 16384;
+            ref_stack.back()->m_data.m_value.array->reserve((std::min)(len, reserve_cap));
         }
 
         return true;
@@ -532,12 +547,16 @@ class json_sax_dom_callback_parser
 
     bool string(string_t& val)
     {
-        handle_value(val);
+        // json_sax documents that the passed value may be moved from,
+        // so hand the buffer over instead of copying it
+        handle_value(std::move(val));
         return true;
     }
 
     bool binary(binary_t& val)
     {
+        // json_sax documents that the passed value may be moved from,
+        // so hand the buffer over instead of copying it
         handle_value(std::move(val));
         return true;
     }
@@ -547,6 +566,11 @@ class json_sax_dom_callback_parser
         // check callback for object start
         const bool keep = callback(static_cast<int>(ref_stack.size()), parse_event_t::object_start, discarded);
         keep_stack.push_back(keep);
+
+        // the key this object will be stored under, read before handle_value()
+        // may consume it; kept in lockstep with ref_stack so end_object() can
+        // find the object in its parent again
+        container_key_stack.push_back(current_key());
 
         auto val = handle_value(BasicJsonType::value_t::object, true);
         ref_stack.push_back(val.second);
@@ -581,6 +605,9 @@ class json_sax_dom_callback_parser
         // check callback for the key
         const bool keep = callback(static_cast<int>(ref_stack.size()), parse_event_t::key, k);
         key_keep_stack.push_back(keep);
+        // remember the key so a rejected value can be erased without searching
+        // the object for it (kept in lockstep with key_keep_stack)
+        key_stack.push_back(val);
 
         // add discarded value at the given key and store the reference for later
         if (keep && ref_stack.back())
@@ -622,13 +649,16 @@ class json_sax_dom_callback_parser
 
         JSON_ASSERT(!ref_stack.empty());
         JSON_ASSERT(!keep_stack.empty());
+        JSON_ASSERT(!container_key_stack.empty());
         ref_stack.pop_back();
         keep_stack.pop_back();
+        const string_t object_key = std::move(container_key_stack.back());
+        container_key_stack.pop_back();
 
         if (!ref_stack.empty() && ref_stack.back() && ref_stack.back()->is_structured())
         {
             // remove discarded value
-            remove_discarded_value(*ref_stack.back());
+            remove_discarded_value(*ref_stack.back(), object_key);
         }
 
         return true;
@@ -638,6 +668,9 @@ class json_sax_dom_callback_parser
     {
         const bool keep = callback(static_cast<int>(ref_stack.size()), parse_event_t::array_start, discarded);
         keep_stack.push_back(keep);
+
+        // see start_object()
+        container_key_stack.push_back(current_key());
 
         auto val = handle_value(BasicJsonType::value_t::array, true);
         ref_stack.push_back(val.second);
@@ -660,6 +693,16 @@ class json_sax_dom_callback_parser
             if (JSON_HEDLEY_UNLIKELY(len != detail::unknown_size() && len > ref_stack.back()->max_size()))
             {
                 JSON_THROW(out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
+            }
+
+            if (len != detail::unknown_size())
+            {
+                // reserve upfront to avoid repeated reallocations while adding elements,
+                // but cap the reservation so a bogus/hostile length (which is not bounded
+                // by max_size(), unlike e.g. std::vector) cannot trigger an oversized
+                // allocation for a small or truncated input
+                constexpr std::size_t reserve_cap = 16384;
+                ref_stack.back()->m_data.m_value.array->reserve((std::min)(len, reserve_cap));
             }
         }
 
@@ -701,8 +744,11 @@ class json_sax_dom_callback_parser
 
         JSON_ASSERT(!ref_stack.empty());
         JSON_ASSERT(!keep_stack.empty());
+        JSON_ASSERT(!container_key_stack.empty());
         ref_stack.pop_back();
         keep_stack.pop_back();
+        const string_t object_key = std::move(container_key_stack.back());
+        container_key_stack.pop_back();
 
         // remove discarded value
         if (!ref_stack.empty() && ref_stack.back())
@@ -716,7 +762,7 @@ class json_sax_dom_callback_parser
                 // the array is either still stored under its key or was never
                 // stored, leaving the placeholder key() wrote; both show up as
                 // a discarded member of the parent object
-                remove_discarded_value(*ref_stack.back());
+                remove_discarded_value(*ref_stack.back(), object_key);
             }
         }
 
@@ -809,15 +855,56 @@ class json_sax_dom_callback_parser
     }
 #endif
 
-    /// remove the discarded value the callback rejected from its parent
-    static void remove_discarded_value(BasicJsonType& parent)
+    /*!
+    @brief the key the value now being handled will be stored under
+
+    Empty unless the enclosing container is an object, in which case it is the
+    key of the pending key() event. Read before handle_value() consumes that
+    key, so it is also correct when the value never reaches its parent.
+    */
+    string_t current_key() const
     {
-        for (auto it = parent.begin(); it != parent.end(); ++it)
+        if (!ref_stack.empty() && ref_stack.back() && ref_stack.back()->is_object()
+                && !key_stack.empty())
         {
-            if (it->is_discarded())
+            return key_stack.back();
+        }
+        return string_t{};
+    }
+
+    /*!
+    @brief remove the discarded value the callback rejected from its parent
+
+    A rejected value can only ever be the one most recently added to @a parent:
+    the last element of an array, or the placeholder key() stored under @a key
+    in an object. Looking there directly makes this O(1) resp. O(log n), where
+    searching @a parent for it made a filtering parse quadratic in the number of
+    members of a single container.
+
+    Finding no discarded value there means none was stored in the first place -
+    the callback rejected the value before it reached its parent - so there is
+    nothing to remove.
+
+    @param[in,out] parent  the container to remove the rejected value from
+    @param[in] key  the key the value was stored under; unused for arrays
+    */
+    static void remove_discarded_value(BasicJsonType& parent, const string_t& key)
+    {
+        if (parent.is_array())
+        {
+            auto& array = *parent.m_data.m_value.array;
+            if (!array.empty() && array.back().is_discarded())
             {
-                parent.erase(it);
-                break;
+                array.pop_back();
+            }
+        }
+        else if (parent.is_object())
+        {
+            auto& object = *parent.m_data.m_value.object;
+            const auto it = object.find(key);
+            if (it != object.end() && it->second.is_discarded())
+            {
+                object.erase(it);
             }
         }
     }
@@ -867,11 +954,14 @@ class json_sax_dom_callback_parser
             if (!ref_stack.empty() && ref_stack.back() && ref_stack.back()->is_object())
             {
                 JSON_ASSERT(!key_keep_stack.empty());
+                JSON_ASSERT(!key_stack.empty());
                 const bool placeholder_stored = key_keep_stack.back();
                 key_keep_stack.pop_back();
+                const string_t key = std::move(key_stack.back());
+                key_stack.pop_back();
                 if (placeholder_stored)
                 {
-                    remove_discarded_value(*ref_stack.back());
+                    remove_discarded_value(*ref_stack.back(), key);
                 }
             }
             return {false, nullptr};
@@ -904,8 +994,10 @@ class json_sax_dom_callback_parser
         JSON_ASSERT(ref_stack.back()->is_object());
         // check if we should store an element for the current key
         JSON_ASSERT(!key_keep_stack.empty());
+        JSON_ASSERT(!key_stack.empty());
         const bool store_element = key_keep_stack.back();
         key_keep_stack.pop_back();
+        key_stack.pop_back();
 
         if (!store_element)
         {
@@ -925,6 +1017,12 @@ class json_sax_dom_callback_parser
     std::vector<bool> keep_stack {}; // NOLINT(readability-redundant-member-init)
     /// stack to manage which object keys to keep
     std::vector<bool> key_keep_stack {}; // NOLINT(readability-redundant-member-init)
+    /// the keys key() stored a placeholder for, in lockstep with key_keep_stack
+    std::vector<string_t> key_stack {}; // NOLINT(readability-redundant-member-init)
+    /// for each open container, the key it is stored under in its parent
+    /// object, in lockstep with ref_stack; unused where the parent is not an
+    /// object
+    std::vector<string_t> container_key_stack {}; // NOLINT(readability-redundant-member-init)
     /// helper to hold the reference for the next object element
     BasicJsonType* object_element = nullptr;
     /// whether a syntax error occurred
