@@ -404,6 +404,18 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     /// @}
 
+    // Two template parameter requirements that would otherwise be silently
+    // violated: neither produces a diagnostic of its own, and both corrupt
+    // values rather than failing.
+
+    static_assert(sizeof(typename BinaryType::value_type) == 1,
+                  "BinaryType::value_type must be exactly one byte wide, "
+                  "because the binary readers and writers reinterpret the container's storage as raw bytes");
+
+    static_assert(sizeof(NumberUnsignedType) >= sizeof(NumberIntegerType),
+                  "NumberUnsignedType must be at least as wide as NumberIntegerType, "
+                  "because it has to hold the absolute value of every NumberIntegerType value");
+
   private:
 
     /// helper for exception-safe object creation
@@ -784,21 +796,76 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         return it;
     }
 
-    reference set_parent(reference j, std::size_t old_capacity = detail::unknown_size())
+    /// @brief erase an element from the object and return the following one
+    /// Not every map returns an iterator from erase(iterator): some containers
+    /// (e.g., Abseil's hash maps) return void to avoid computing a successor
+    /// the caller may not need. Compute it before erasing for those.
+    template < typename It, detail::enable_if_t <
+                   !detail::erase_returns_void<object_t, It>::value, int > = 0 >
+    typename object_t::iterator erase_from_object(It pos)
+    {
+        return m_data.m_value.object->erase(pos);
+    }
+
+    template < typename It, detail::enable_if_t <
+                   detail::erase_returns_void<object_t, It>::value, int > = 0 >
+    typename object_t::iterator erase_from_object(It pos)
+    {
+        auto next = std::next(pos);
+        m_data.m_value.object->erase(pos);
+        return next;
+    }
+
+    /// @brief the capacity of the stored array, or unknown_size()
+    /// Only JSON_DIAGNOSTICS uses the value, to detect a reallocation that
+    /// would invalidate the parent pointers. Array types that do not have a
+    /// capacity() member function report unknown_size(), which is treated as
+    /// "the elements may have moved".
+#if JSON_DIAGNOSTICS
+    template < typename A = array_t, detail::enable_if_t < detail::has_capacity<A>::value, int > = 0 >
+    std::size_t array_capacity() const noexcept
+    {
+        return m_data.m_value.array->capacity();
+    }
+
+    template < typename A = array_t, detail::enable_if_t < !detail::has_capacity<A>::value, int > = 0 >
+    std::size_t array_capacity() const noexcept
+    {
+        return detail::unknown_size();
+    }
+#else
+    static constexpr std::size_t array_capacity() noexcept
+    {
+        return detail::unknown_size();
+    }
+#endif
+
+    /// @brief set the parent of a value that has just been added to an array
+    /// @param j the added value
+    /// @param old_capacity the value @ref array_capacity() returned before the
+    ///        insertion
+    reference set_parent_after_array_insert(reference j, std::size_t old_capacity)
     {
 #if JSON_DIAGNOSTICS
-        if (old_capacity != detail::unknown_size())
+        // see https://github.com/nlohmann/json/issues/2838
+        JSON_ASSERT(type() == value_t::array);
+        if (JSON_HEDLEY_UNLIKELY(old_capacity == detail::unknown_size()
+                                 || array_capacity() != old_capacity))
         {
-            // see https://github.com/nlohmann/json/issues/2838
-            JSON_ASSERT(type() == value_t::array);
-            if (JSON_HEDLEY_UNLIKELY(m_data.m_value.array->capacity() != old_capacity))
-            {
-                // capacity has changed: update all parents
-                set_parents();
-                return j;
-            }
+            // the capacity has changed, or the array type does not let us tell:
+            // the elements may have moved, so update all parents
+            set_parents();
+            return j;
         }
+#else
+        static_cast<void>(old_capacity);
+#endif
+        return set_parent(j);
+    }
 
+    reference set_parent(reference j)
+    {
+#if JSON_DIAGNOSTICS
         // ordered_json uses a vector internally, so pointers could have
         // been invalidated; see https://github.com/nlohmann/json/issues/2962
 #ifdef JSON_HEDLEY_MSVC_VERSION
@@ -817,7 +884,6 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         j.m_parent = this;
 #else
         static_cast<void>(j);
-        static_cast<void>(old_capacity);
 #endif
         return j;
     }
@@ -2029,22 +2095,17 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     reference at(size_type idx)
     {
         // at only works for arrays
-        if (JSON_HEDLEY_LIKELY(is_array()))
-        {
-            JSON_TRY
-            {
-                return set_parent(m_data.m_value.array->at(idx));
-            }
-            JSON_CATCH (std::out_of_range&)
-            {
-                // create a better exception explanation
-                JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
-            } // cppcheck-suppress[missingReturn]
-        }
-        else
+        if (JSON_HEDLEY_UNLIKELY(!is_array()))
         {
             JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
         }
+
+        if (JSON_HEDLEY_UNLIKELY(idx >= m_data.m_value.array->size()))
+        {
+            JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
+        }
+
+        return set_parent((*m_data.m_value.array)[idx]);
     }
 
     /// @brief access specified array element with bounds checking
@@ -2052,22 +2113,17 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     const_reference at(size_type idx) const
     {
         // at only works for arrays
-        if (JSON_HEDLEY_LIKELY(is_array()))
-        {
-            JSON_TRY
-            {
-                return m_data.m_value.array->at(idx);
-            }
-            JSON_CATCH (std::out_of_range&)
-            {
-                // create a better exception explanation
-                JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
-            } // cppcheck-suppress[missingReturn]
-        }
-        else
+        if (JSON_HEDLEY_UNLIKELY(!is_array()))
         {
             JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
         }
+
+        if (JSON_HEDLEY_UNLIKELY(idx >= m_data.m_value.array->size()))
+        {
+            JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
+        }
+
+        return (*m_data.m_value.array)[idx];
     }
 
     /// @brief access specified object element with bounds checking
@@ -2167,12 +2223,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 #if JSON_DIAGNOSTICS
                 // remember array size & capacity before resizing
                 const auto old_size = m_data.m_value.array->size();
-                const auto old_capacity = m_data.m_value.array->capacity();
+                const auto old_capacity = array_capacity();
 #endif
                 m_data.m_value.array->resize(idx + 1);
 
 #if JSON_DIAGNOSTICS
-                if (JSON_HEDLEY_UNLIKELY(m_data.m_value.array->capacity() != old_capacity))
+                if (JSON_HEDLEY_UNLIKELY(old_capacity == detail::unknown_size()
+                                         || array_capacity() != old_capacity))
                 {
                     // capacity has changed: update all parents
                     set_parents();
@@ -2563,7 +2620,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
             case value_t::object:
             {
-                result.m_it.object_iterator = m_data.m_value.object->erase(pos.m_it.object_iterator);
+                result.m_it.object_iterator = erase_from_object(pos.m_it.object_iterator);
                 break;
             }
 
@@ -3202,9 +3259,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
 
         // add the element to the array (move semantics)
-        const auto old_capacity = m_data.m_value.array->capacity();
+        const auto old_capacity = array_capacity();
         m_data.m_value.array->push_back(std::move(val));
-        set_parent(m_data.m_value.array->back(), old_capacity);
+        set_parent_after_array_insert(m_data.m_value.array->back(), old_capacity);
         // if val is moved from, basic_json move constructor marks it null, so we do not call the destructor
     }
 
@@ -3235,9 +3292,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
 
         // add the element to the array
-        const auto old_capacity = m_data.m_value.array->capacity();
+        const auto old_capacity = array_capacity();
         m_data.m_value.array->push_back(val);
-        set_parent(m_data.m_value.array->back(), old_capacity);
+        set_parent_after_array_insert(m_data.m_value.array->back(), old_capacity);
     }
 
     /// @brief add an object to an array
@@ -3323,9 +3380,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
 
         // add the element to the array (perfect forwarding)
-        const auto old_capacity = m_data.m_value.array->capacity();
+        const auto old_capacity = array_capacity();
         m_data.m_value.array->emplace_back(std::forward<Args>(args)...);
-        return set_parent(m_data.m_value.array->back(), old_capacity);
+        return set_parent_after_array_insert(m_data.m_value.array->back(), old_capacity);
     }
 
     /// @brief add an object to an object if key does not exist
@@ -3404,7 +3461,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/insert/
     iterator insert(const_iterator pos, basic_json&& val) // NOLINT(performance-unnecessary-value-param)
     {
-        return insert(pos, val);
+        return insert(std::move(pos), val);
     }
 
     /// @brief inserts copies of element into array
@@ -3452,6 +3509,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         if (JSON_HEDLEY_UNLIKELY(first.m_object == this))
         {
             JSON_THROW(invalid_iterator::create(211, "passed iterators may not belong to container", this));
+        }
+
+        // passed iterators must belong to arrays
+        if (JSON_HEDLEY_UNLIKELY(!first.m_object->is_array()))
+        {
+            JSON_THROW(invalid_iterator::create(202, "iterators first and last must point to arrays", this));
         }
 
         // insert to array and return iterator
@@ -3576,6 +3639,11 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         std::swap(m_data.m_type, other.m_data.m_type);
         std::swap(m_data.m_value, other.m_data.m_value);
 
+#if JSON_DIAGNOSTIC_POSITIONS
+        std::swap(start_position, other.start_position);
+        std::swap(end_position, other.end_position);
+#endif
+
         set_parents();
         other.set_parents();
         assert_invariant();
@@ -3602,6 +3670,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         {
             using std::swap;
             swap(*(m_data.m_value.array), other);
+            set_parents();
         }
         else
         {
@@ -3618,6 +3687,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         {
             using std::swap;
             swap(*(m_data.m_value.object), other);
+            set_parents();
         }
         else
         {
@@ -5268,34 +5338,139 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
             case value_t::object:
             {
-                // first pass: traverse this object's elements
+                // first pass: record, for every source key, whether it is
+                // common to both objects (in source's iteration order) or
+                // was deleted (i.e., in source but not in target) -- this is
+                // a by-product of the target.find() call already needed to
+                // tell the two cases apart, so it adds no extra lookups. The
+                // "remove" ops themselves are emitted later, interleaved
+                // with the recursive per-key diffs in the fast path below,
+                // to match source's original iteration order (as the
+                // original, pre-reordering-aware implementation did) instead
+                // of grouping all removes before all recursive diffs.
+                std::vector<typename object_t::key_type> common_keys_source_order;
                 for (auto it = source.cbegin(); it != source.cend(); ++it)
                 {
-                    // escape the key name to be used in a JSON patch
-                    const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
-
                     if (target.find(it.key()) != target.end())
                     {
-                        // recursive call to compare object values at key it
-                        auto temp_diff = diff(it.value(), target[it.key()], path_key);
-                        result.insert(result.end(), temp_diff.begin(), temp_diff.end());
+                        common_keys_source_order.push_back(it.key());
+                    }
+                }
+
+                // second pass: find keys that were added (i.e., in target but
+                // not in source), and record the keys common to both, in
+                // target's iteration order -- again a by-product of the
+                // source.find() call already needed to detect added keys. At
+                // the same time, determine whether every added key comes
+                // after every common key in target's order (a precondition
+                // for the fast path below, which only ever appends new keys
+                // at the very end): for an object_t whose iteration order is
+                // a pure function of the key set (e.g. the default std::map,
+                // which always iterates in sorted key order), the order
+                // check further below is always true and this whole
+                // mechanism is effectively a no-op; it only matters for a
+                // reorderable object_t such as the one backing `ordered_json`.
+                // patch ops for keys that were added (i.e., in target but not
+                // in source); built here so the fast path below can reuse
+                // them without a second source.find() per target key. Only
+                // used by the fast path -- the slow (reordering) path
+                // rebuilds "add" ops for every key itself.
+                std::vector<typename object_t::key_type> common_keys_target_order;
+                basic_json added_ops(value_t::array);
+                bool new_keys_form_suffix = true;
+                bool seen_new_key = false;
+                for (auto it = target.cbegin(); it != target.cend(); ++it)
+                {
+                    if (source.find(it.key()) == source.end())
+                    {
+                        seen_new_key = true;
+                        const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
+                        added_ops.push_back(
+                        {
+                            {"op", "add"}, {"path", path_key},
+                            {"value", it.value()}
+                        });
                     }
                     else
                     {
-                        // found a key that is not in o -> remove it
+                        common_keys_target_order.push_back(it.key());
+                        if (seen_new_key)
+                        {
+                            new_keys_form_suffix = false;
+                        }
+                    }
+                }
+
+                if (common_keys_source_order == common_keys_target_order && new_keys_form_suffix)
+                {
+                    // fast path: order of common keys already matches (or the
+                    // object_t's iteration order does not depend on
+                    // insertion history), so a plain per-key recursive diff
+                    // is correct and minimal, as before. common_keys_source_order
+                    // is, by construction, the subsequence of source's keys
+                    // that are common to both objects, in source's iteration
+                    // order -- so it can be walked in lockstep with `source`
+                    // using a cheap key comparison instead of another lookup.
+                    // Deleted keys (those source keys not in common_keys_source_order)
+                    // are interleaved here too, in source's original order, to
+                    // match the historical (pre-reordering-aware) output order.
+                    auto common_it = common_keys_source_order.cbegin();
+                    for (auto it = source.cbegin(); it != source.cend(); ++it)
+                    {
+                        if (common_it != common_keys_source_order.cend() && it.key() == *common_it)
+                        {
+                            const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
+                            auto temp_diff = diff(it.value(), target[it.key()], path_key);
+                            result.insert(result.end(), temp_diff.begin(), temp_diff.end());
+                            ++common_it;
+                        }
+                        else
+                        {
+                            // found a key that is not in target -> remove it
+                            const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
+                            result.push_back(object(
+                            {
+                                {"op", "remove"}, {"path", path_key}
+                            }));
+                        }
+                    }
+
+                    // append the "add" ops for brand-new keys collected above
+                    // during the pass over target -- no second source.find()
+                    // per target key needed
+                    result.insert(result.end(), added_ops.begin(), added_ops.end());
+                }
+                else
+                {
+                    // slow path: the common keys are in a different relative
+                    // order in source and target (only possible for a
+                    // reorderable object_t like ordered_map). Building a
+                    // minimal reordering patch is a nontrivial (LCS-like)
+                    // problem; instead, remove every source key -- both
+                    // deleted keys (which must be removed regardless) and
+                    // common keys (removed so they can be re-added in
+                    // target's order) -- and re-add every key that should
+                    // remain, with its final target value, in target's
+                    // order. basic_json::patch()'s "add" operation on an
+                    // object uses operator[], which appends at the end for a
+                    // vector-backed insertion-ordered map when the key does
+                    // not already exist -- so removing a key and then adding
+                    // it moves it to the end, fixing its position.
+                    for (auto it = source.cbegin(); it != source.cend(); ++it)
+                    {
+                        const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
                         result.push_back(object(
                         {
                             {"op", "remove"}, {"path", path_key}
                         }));
                     }
-                }
 
-                // second pass: traverse other object's elements
-                for (auto it = target.cbegin(); it != target.cend(); ++it)
-                {
-                    if (source.find(it.key()) == source.end())
+                    // add every key that is either common (just removed
+                    // above) or brand new, in target's iteration order, so
+                    // that the final order after applying the patch matches
+                    // target exactly
+                    for (auto it = target.cbegin(); it != target.cend(); ++it)
                     {
-                        // found a key that is not in this -> add it
                         const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
                         result.push_back(
                         {

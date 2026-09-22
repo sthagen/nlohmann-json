@@ -8,16 +8,17 @@
 
 #pragma once
 
-#include <algorithm> // min
+#include <algorithm> // find_if, min
 #include <cstddef>
 #include <string> // string
 #include <type_traits> // enable_if_t
-#include <utility> // move
+#include <utility> // move, pair
 #include <vector> // vector
 
 #include <nlohmann/detail/exceptions.hpp>
 #include <nlohmann/detail/input/lexer.hpp>
 #include <nlohmann/detail/macro_scope.hpp>
+#include <nlohmann/detail/meta/cpp_future.hpp>
 #include <nlohmann/detail/string_concat.hpp>
 NLOHMANN_JSON_NAMESPACE_BEGIN
 
@@ -152,6 +153,29 @@ constexpr std::size_t unknown_size()
 }
 
 /*!
+@brief reserve capacity for @a len elements in array @a arr
+
+Reserving upfront avoids repeated reallocations while the elements are added,
+but the reservation is capped so a bogus/hostile length (which is not bounded
+by max_size(), unlike e.g. std::vector) cannot trigger an oversized allocation
+for a small or truncated input.
+
+The overload below is selected for array types without reserve() (e.g.,
+std::deque), which are then left untouched.
+*/
+template<typename ArrayType>
+auto reserve_array(ArrayType& arr, std::size_t len, priority_tag<1> /*unused*/)
+-> decltype(arr.reserve(len), void())
+{
+    constexpr std::size_t reserve_cap = 16384;
+    arr.reserve((std::min)(len, reserve_cap));
+}
+
+template<typename ArrayType>
+inline void reserve_array(ArrayType& /*arr*/, std::size_t /*len*/, priority_tag<0> /*unused*/)
+{}
+
+/*!
 @brief SAX implementation to create a JSON value from SAX events
 
 This class implements the @ref json_sax interface and processes the SAX events
@@ -254,7 +278,7 @@ class json_sax_dom_parser
 
         if (JSON_HEDLEY_UNLIKELY(len != detail::unknown_size() && len > ref_stack.back()->max_size()))
         {
-            JSON_THROW(out_of_range::create(408, concat("excessive object size: ", std::to_string(len)), ref_stack.back()));
+            return parse_error(0, "", out_of_range::create(408, concat("excessive object size: ", std::to_string(len)), ref_stack.back()));
         }
 
         return true;
@@ -303,17 +327,12 @@ class json_sax_dom_parser
 
         if (JSON_HEDLEY_UNLIKELY(len != detail::unknown_size() && len > ref_stack.back()->max_size()))
         {
-            JSON_THROW(out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
+            return parse_error(0, "", out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
         }
 
         if (len != detail::unknown_size())
         {
-            // reserve upfront to avoid repeated reallocations while adding elements,
-            // but cap the reservation so a bogus/hostile length (which is not bounded
-            // by max_size(), unlike e.g. std::vector) cannot trigger an oversized
-            // allocation for a small or truncated input
-            constexpr std::size_t reserve_cap = 16384;
-            ref_stack.back()->m_data.m_value.array->reserve((std::min)(len, reserve_cap));
+            reserve_array(*ref_stack.back()->m_data.m_value.array, len, priority_tag<1> {});
         }
 
         return true;
@@ -592,7 +611,7 @@ class json_sax_dom_callback_parser
             // check object limit
             if (JSON_HEDLEY_UNLIKELY(len != detail::unknown_size() && len > ref_stack.back()->max_size()))
             {
-                JSON_THROW(out_of_range::create(408, concat("excessive object size: ", std::to_string(len)), ref_stack.back()));
+                return parse_error(0, "", out_of_range::create(408, concat("excessive object size: ", std::to_string(len)), ref_stack.back()));
             }
         }
         return true;
@@ -612,7 +631,17 @@ class json_sax_dom_callback_parser
         // add discarded value at the given key and store the reference for later
         if (keep && ref_stack.back())
         {
-            object_element = &(ref_stack.back()->m_data.m_value.object->operator[](val) = discarded);
+            auto& obj = *ref_stack.back()->m_data.m_value.object;
+            const auto it = obj.find(val);
+            if (it != obj.end())
+            {
+                // this is a duplicate key (legal in JSON); remember its
+                // current value so it can be restored later if the new
+                // value is rejected by the callback, instead of being
+                // erased together with the discarded placeholder
+                duplicate_key_stash.emplace_back(&(it->second), it->second);
+            }
+            object_element = &(obj[val] = discarded);
         }
 
         return true;
@@ -624,13 +653,18 @@ class json_sax_dom_callback_parser
         {
             if (!callback(static_cast<int>(ref_stack.size()) - 1, parse_event_t::object_end, *ref_stack.back()))
             {
-                // discard object
-                *ref_stack.back() = discarded;
+                // discard object, unless this slot holds a duplicate key's
+                // previous value pending restoration, in which case that
+                // value is restored instead of being discarded
+                if (!resolve_duplicate_key_stash(ref_stack.back(), true))
+                {
+                    *ref_stack.back() = discarded;
 
 #if JSON_DIAGNOSTIC_POSITIONS
-                // Set start/end positions for discarded object.
-                handle_diagnostic_positions_for_json_value(*ref_stack.back());
+                    // Set start/end positions for discarded object.
+                    handle_diagnostic_positions_for_json_value(*ref_stack.back());
 #endif
+                }
             }
             else
             {
@@ -644,6 +678,10 @@ class json_sax_dom_callback_parser
 #endif
 
                 ref_stack.back()->set_parents();
+                // this object is finally, definitively kept; drop any
+                // pending duplicate-key stash entry for its slot since it
+                // can no longer be restored
+                resolve_duplicate_key_stash(ref_stack.back(), false);
             }
         }
 
@@ -692,17 +730,12 @@ class json_sax_dom_callback_parser
             // check array limit
             if (JSON_HEDLEY_UNLIKELY(len != detail::unknown_size() && len > ref_stack.back()->max_size()))
             {
-                JSON_THROW(out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
+                return parse_error(0, "", out_of_range::create(408, concat("excessive array size: ", std::to_string(len)), ref_stack.back()));
             }
 
             if (len != detail::unknown_size())
             {
-                // reserve upfront to avoid repeated reallocations while adding elements,
-                // but cap the reservation so a bogus/hostile length (which is not bounded
-                // by max_size(), unlike e.g. std::vector) cannot trigger an oversized
-                // allocation for a small or truncated input
-                constexpr std::size_t reserve_cap = 16384;
-                ref_stack.back()->m_data.m_value.array->reserve((std::min)(len, reserve_cap));
+                reserve_array(*ref_stack.back()->m_data.m_value.array, len, priority_tag<1> {});
             }
         }
 
@@ -729,16 +762,25 @@ class json_sax_dom_callback_parser
 #endif
 
                 ref_stack.back()->set_parents();
+                // this array is finally, definitively kept; drop any
+                // pending duplicate-key stash entry for its slot since it
+                // can no longer be restored
+                resolve_duplicate_key_stash(ref_stack.back(), false);
             }
             else
             {
-                // discard array
-                *ref_stack.back() = discarded;
+                // discard array, unless this slot holds a duplicate key's
+                // previous value pending restoration, in which case that
+                // value is restored instead of being discarded
+                if (!resolve_duplicate_key_stash(ref_stack.back(), true))
+                {
+                    *ref_stack.back() = discarded;
 
 #if JSON_DIAGNOSTIC_POSITIONS
-                // Set start/end positions for discarded array.
-                handle_diagnostic_positions_for_json_value(*ref_stack.back());
+                    // Set start/end positions for discarded array.
+                    handle_diagnostic_positions_for_json_value(*ref_stack.back());
 #endif
+                }
             }
         }
 
@@ -855,6 +897,35 @@ class json_sax_dom_callback_parser
     }
 #endif
 
+    /// if there is a pending duplicate-key stash entry for this exact slot,
+    /// remove it from the stash; if restore_value is true, the stashed
+    /// previous value is moved back into the slot first (use this when the
+    /// new value at that slot was rejected); otherwise the stash entry is
+    /// simply dropped (use this when the new value was accepted, so it
+    /// correctly supersedes the old one and no restore should ever happen
+    /// for this slot again)
+    /// @return whether a matching stash entry was found (and processed)
+    bool resolve_duplicate_key_stash(BasicJsonType* slot, bool restore_value)
+    {
+        const auto it = std::find_if(duplicate_key_stash.begin(), duplicate_key_stash.end(),
+                                     [slot](const std::pair<BasicJsonType*, BasicJsonType>& entry)
+        {
+            return entry.first == slot;
+        });
+
+        if (it == duplicate_key_stash.end())
+        {
+            return false;
+        }
+
+        if (restore_value)
+        {
+            *slot = std::move(it->second);
+        }
+        duplicate_key_stash.erase(it);
+        return true;
+    }
+
     /*!
     @brief the key the value now being handled will be stored under
 
@@ -873,7 +944,9 @@ class json_sax_dom_callback_parser
     }
 
     /*!
-    @brief remove the discarded value the callback rejected from its parent
+    @brief remove the discarded value the callback rejected from its parent,
+    unless it is a duplicate key's slot with a stashed previous value, in
+    which case that previous value is restored instead
 
     A rejected value can only ever be the one most recently added to @a parent:
     the last element of an array, or the placeholder key() stored under @a key
@@ -888,7 +961,7 @@ class json_sax_dom_callback_parser
     @param[in,out] parent  the container to remove the rejected value from
     @param[in] key  the key the value was stored under; unused for arrays
     */
-    static void remove_discarded_value(BasicJsonType& parent, const string_t& key)
+    void remove_discarded_value(BasicJsonType& parent, const string_t& key)
     {
         if (parent.is_array())
         {
@@ -904,7 +977,12 @@ class json_sax_dom_callback_parser
             const auto it = object.find(key);
             if (it != object.end() && it->second.is_discarded())
             {
-                object.erase(it);
+                // a duplicate key's slot has a stashed previous value that
+                // must be restored instead of being erased
+                if (!resolve_duplicate_key_stash(&it->second, true))
+                {
+                    object.erase(it);
+                }
             }
         }
     }
@@ -1006,6 +1084,16 @@ class json_sax_dom_callback_parser
 
         JSON_ASSERT(object_element);
         *object_element = std::move(value);
+        if (!skip_callback)
+        {
+            // this scalar value finally, definitively replaces whatever was
+            // at this slot; drop any pending duplicate-key stash entry for
+            // it since it can no longer be restored (a container value at
+            // this slot is resolved later, in end_object()/end_array(),
+            // since skip_callback is true for the placeholder handling that
+            // happens here for those)
+            resolve_duplicate_key_stash(object_element, false);
+        }
         return {true, object_element};
     }
 
@@ -1025,6 +1113,12 @@ class json_sax_dom_callback_parser
     std::vector<string_t> container_key_stack {}; // NOLINT(readability-redundant-member-init)
     /// helper to hold the reference for the next object element
     BasicJsonType* object_element = nullptr;
+    /// stash of (slot pointer, previous value) for object members that
+    /// already existed when key() was called again for the same key
+    /// (duplicate keys); used to restore the previous value if the new
+    /// value is later rejected by the callback, instead of erasing the
+    /// member entirely
+    std::vector<std::pair<BasicJsonType*, BasicJsonType>> duplicate_key_stash {};
     /// whether a syntax error occurred
     bool errored = false;
     /// callback function

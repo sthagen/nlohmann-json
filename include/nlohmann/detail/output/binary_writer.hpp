@@ -261,7 +261,7 @@ class binary_writer
 
                 // step 2: write the string
                 oa->write_characters(
-                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->c_str()),
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->data()),
                     j.m_data.m_value.string->size());
                 break;
             }
@@ -581,7 +581,7 @@ class binary_writer
 
                 // step 2: write the string
                 oa->write_characters(
-                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->c_str()),
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->data()),
                     j.m_data.m_value.string->size());
                 break;
             }
@@ -688,6 +688,11 @@ class binary_writer
                 // step 1.5: if this is an ext type, write the subtype
                 if (use_ext)
                 {
+                    if (JSON_HEDLEY_UNLIKELY(j.m_data.m_value.binary->subtype() > (std::numeric_limits<std::uint8_t>::max)()))
+                    {
+                        JSON_THROW(out_of_range::create(415, concat("subtype ", std::to_string(j.m_data.m_value.binary->subtype()), " is too large for the MessagePack ext type (max 255)"), &j));
+                    }
+
                     write_number(static_cast<std::int8_t>(j.m_data.m_value.binary->subtype()));
                 }
 
@@ -798,7 +803,7 @@ class binary_writer
                 }
                 write_number_with_ubjson_prefix(j.m_data.m_value.string->size(), true, use_bjdata);
                 oa->write_characters(
-                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->c_str()),
+                    reinterpret_cast<const CharType*>(j.m_data.m_value.string->data()),
                     j.m_data.m_value.string->size());
                 break;
             }
@@ -897,7 +902,9 @@ class binary_writer
                     for (size_t i = 0; i < j.m_data.m_value.binary->size(); ++i)
                     {
                         oa->write_character(to_char_type(bjdata_draft3 ? 'B' : 'U'));
-                        oa->write_character(to_char_type(j.m_data.m_value.binary->data()[i]));
+                        // the cast is needed for binary types whose value type
+                        // is not an integer (e.g., std::byte)
+                        oa->write_character(to_char_type(static_cast<std::uint8_t>(j.m_data.m_value.binary->data()[i])));
                     }
                 }
 
@@ -958,7 +965,7 @@ class binary_writer
                 {
                     write_number_with_ubjson_prefix(el.first.size(), true, use_bjdata);
                     oa->write_characters(
-                        reinterpret_cast<const CharType*>(el.first.c_str()),
+                        reinterpret_cast<const CharType*>(el.first.data()),
                         el.first.size());
                     write_ubjson(el.second, use_count, use_type, prefix_required, use_bjdata, bjdata_version);
                 }
@@ -1021,8 +1028,11 @@ class binary_writer
     {
         oa->write_character(to_char_type(element_type));
         oa->write_characters(
-            reinterpret_cast<const CharType*>(name.c_str()),
-            name.size() + 1u);
+            reinterpret_cast<const CharType*>(name.data()),
+            name.size());
+        // the terminating null byte is written explicitly rather than taken
+        // from the buffer, so that string_t::data() need not be null-terminated
+        oa->write_character(to_char_type(0x00));
     }
 
     /*!
@@ -1063,8 +1073,11 @@ class binary_writer
 
         write_number<std::int32_t>(to_bson_length(value.size() + 1ul), true);
         oa->write_characters(
-            reinterpret_cast<const CharType*>(value.c_str()),
-            value.size() + 1);
+            reinterpret_cast<const CharType*>(value.data()),
+            value.size());
+        // the terminating null byte is written explicitly rather than taken
+        // from the buffer, so that string_t::data() need not be null-terminated
+        oa->write_character(to_char_type(0x00));
     }
 
     /*!
@@ -1155,7 +1168,11 @@ class binary_writer
 
         const std::size_t embedded_document_size = std::accumulate(std::begin(value), std::end(value), static_cast<std::size_t>(0), [&array_index](std::size_t result, const typename BasicJsonType::array_t::value_type & el)
         {
-            return result + calc_bson_element_size(std::to_string(array_index++), el);
+            // the index is built as a std::string, while calc_bson_element_size
+            // takes a string_t; convert explicitly, as the two are only
+            // implicitly convertible for some string types
+            const auto key = std::to_string(array_index++);
+            return result + calc_bson_element_size(string_t(key.data(), key.size()), el);
         });
 
         return sizeof(std::int32_t) + embedded_document_size + 1ul;
@@ -1182,7 +1199,11 @@ class binary_writer
 
         for (const auto& el : value)
         {
-            write_bson_element(std::to_string(array_index++), el);
+            // the index is built as a std::string, while write_bson_element takes
+            // a string_t; convert explicitly, as the two are only implicitly
+            // convertible for some string types
+            const auto key = std::to_string(array_index++);
+            write_bson_element(string_t(key.data(), key.size()), el);
         }
 
         oa->write_character(to_char_type(0x00));
@@ -1197,6 +1218,12 @@ class binary_writer
         write_bson_entry_header(name, 0x05);
 
         write_number<std::int32_t>(to_bson_length(value.size()), true);
+
+        if (value.has_subtype() && JSON_HEDLEY_UNLIKELY(value.subtype() > (std::numeric_limits<std::uint8_t>::max)()))
+        {
+            JSON_THROW(out_of_range::create(415, concat("subtype ", std::to_string(value.subtype()), " is too large for the BSON binary subtype (max 255)"), nullptr));
+        }
+
         write_number(value.has_subtype() ? static_cast<std::uint8_t>(value.subtype()) : static_cast<std::uint8_t>(0x00));
 
         oa->write_characters(reinterpret_cast<const CharType*>(value.data()), value.size());
@@ -1682,6 +1709,16 @@ class binary_writer
         };
 
         string_t key = "_ArrayType_";
+        // the type name is looked up as a string below; a non-string
+        // annotation (e.g. a number, null, or an array) cannot name a known
+        // dtype, so it is treated the same as an unrecognized type name and
+        // falls back to a plain object encoding instead of throwing
+        // type_error.302 out of get<string_t>()
+        if (!value.at(key).is_string())
+        {
+            return true;
+        }
+
         // use get<string_t>() instead of static_cast<string_t> to avoid an
         // ambiguous conversion under explicit instantiation on C++17 (see #4825)
         auto it = bjdtype.find(value.at(key).template get<string_t>());
@@ -1690,6 +1727,16 @@ class binary_writer
             return true;
         }
         CharType dtype = it->second;
+
+        // the 'B' (byte) marker is only defined from BJData Draft 3 onward;
+        // emitting it under an earlier draft would produce a stream that an
+        // earlier-draft reader rejects, so such an object falls back to a
+        // plain object encoding instead (see the "Binary values" section of
+        // the BJData documentation)
+        if (dtype == 'B' && bjdata_version < bjdata_version_t::draft3)
+        {
+            return true;
+        }
 
         key = "_ArraySize_";
         // the dimensions are written verbatim as the header length below, so a
