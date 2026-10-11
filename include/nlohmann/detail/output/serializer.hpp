@@ -3,24 +3,23 @@
 // |  |  |__   |  |  | | | |  version 3.12.0
 // |_____|_____|_____|_|___|  https://github.com/nlohmann/json
 //
-// SPDX-FileCopyrightText: 2008, 2009 Björn Hoehrmann <bjoern@hoehrmann.de>
 // SPDX-FileCopyrightText: 2013-2026 Niels Lohmann <https://nlohmann.me>
 // SPDX-License-Identifier: MIT
 
 #pragma once
 
-#include <algorithm> // reverse, remove, fill, find, none_of, min
+#include <algorithm> // remove, fill, find, none_of, min
 #include <array> // array
 #include <clocale> // localeconv, lconv
-#include <cmath> // labs, isfinite, isnan, signbit
+#include <cmath> // isfinite
 #include <cstddef> // size_t, ptrdiff_t
 #include <cstdint> // uint8_t
 #include <cstdio> // snprintf
 #include <cstring> // memcpy, memset
+#include <iterator> // next
 #include <limits> // numeric_limits
 #include <string> // string, char_traits
 #include <type_traits> // is_same
-#include <utility> // move
 #include <vector> // vector
 
 #include <nlohmann/detail/conversions/to_chars.hpp>
@@ -28,9 +27,11 @@
 #include <nlohmann/detail/input/string_scan.hpp>
 #include <nlohmann/detail/macro_scope.hpp>
 #include <nlohmann/detail/meta/cpp_future.hpp>
-#include <nlohmann/detail/output/binary_writer.hpp>
+#include <nlohmann/detail/output/error_handler.hpp>
 #include <nlohmann/detail/output/output_adapters.hpp>
+#include <nlohmann/detail/recursion_depth_limit.hpp>
 #include <nlohmann/detail/string_concat.hpp>
+#include <nlohmann/detail/string_utils.hpp>
 #include <nlohmann/detail/value_t.hpp>
 
 NLOHMANN_JSON_NAMESPACE_BEGIN
@@ -41,14 +42,6 @@ namespace detail
 // serialization //
 ///////////////////
 
-/// how to treat decoding errors
-enum class error_handler_t
-{
-    strict,  ///< throw a type_error exception in case of invalid UTF-8
-    replace, ///< replace invalid UTF-8 sequences with U+FFFD
-    ignore   ///< ignore invalid UTF-8 sequences
-};
-
 template<typename BasicJsonType>
 class serializer
 {
@@ -57,8 +50,6 @@ class serializer
     using number_integer_t = typename BasicJsonType::number_integer_t;
     using number_unsigned_t = typename BasicJsonType::number_unsigned_t;
     using binary_char_t = typename BasicJsonType::binary_t::value_type;
-    static constexpr std::uint8_t UTF8_ACCEPT = 0;
-    static constexpr std::uint8_t UTF8_REJECT = 1;
 
   public:
     /*!
@@ -67,7 +58,7 @@ class serializer
     @param[in] ichar  indentation character to use
     @param[in] pretty_print_  whether the output shall be pretty-printed
     @param[in] ensure_ascii_ If @a ensure_ascii_ is true, all non-ASCII
-    characters in the output are escaped with `\uXXXX` sequences, and the
+    characters in the output are escaped with `\\uXXXX` sequences, and the
     result consists of ASCII characters only.
     @param[in] indent_step_  the indent level
     @param[in] error_handler_  how to react on decoding errors
@@ -83,7 +74,6 @@ class serializer
                const std::size_t indent_step_ = 0,
                error_handler_t error_handler_ = error_handler_t::strict)
         : o(&s)
-        , locale(std::localeconv())
         , indent_char(ichar)
         , pretty_print(pretty_print_)
         , ensure_ascii(ensure_ascii_)
@@ -106,9 +96,10 @@ class serializer
     additional parameter. Arrays and objects are serialized without recursion,
     however deeply they are nested.
 
-    - strings and object keys are escaped using `escape_string()`
-    - integer numbers are converted implicitly via `operator<<`
-    - floating-point numbers are converted to a string using `"%g"` format
+    - strings and object keys are escaped using @ref dump_escaped
+    - integer numbers are converted using a digit-pair lookup table (@ref dump_integer)
+    - floating-point numbers are converted to a string using @ref dump_float, which
+      uses `to_chars` for IEEE-754 types and `snprintf` otherwise
     - binary values are serialized as objects containing the subtype and the
       byte array
 
@@ -133,7 +124,7 @@ class serializer
 
     Serializing a container descends into its elements, so a value nested deeply
     enough used to exhaust the call stack and terminate the process with no
-    exception to catch. The descent is bounded here: once @ref dump_depth_limit
+    exception to catch. The descent is bounded here: once @ref recursion_depth_limit
     levels have been entered, @ref dump_iteratively writes out what is left
     without the call stack. A value nested less deeply than that - all but a
     vanishing minority - is written by exactly the code that always wrote it.
@@ -148,7 +139,7 @@ class serializer
         {
             case value_t::object:
             {
-                if (JSON_HEDLEY_UNLIKELY(depth >= dump_depth_limit()))
+                if (JSON_HEDLEY_UNLIKELY(depth >= recursion_depth_limit()))
                 {
                     dump_iteratively(val, current_indent);
                     return;
@@ -223,7 +214,7 @@ class serializer
 
             case value_t::array:
             {
-                if (JSON_HEDLEY_UNLIKELY(depth >= dump_depth_limit()))
+                if (JSON_HEDLEY_UNLIKELY(depth >= recursion_depth_limit()))
                 {
                     dump_iteratively(val, current_indent);
                     return;
@@ -283,144 +274,26 @@ class serializer
             }
 
             case value_t::string:
-            {
-                put_char('"');
-                dump_escaped(*val.m_data.m_value.string);
-                put_char('"');
-                return;
-            }
-
             case value_t::binary:
-            {
-                if (pretty_print)
-                {
-                    put_literal("{\n");
-
-                    // variable to hold indentation for recursive calls
-                    const auto new_indent = next_indent(current_indent, indent_step);
-
-                    put_indent(new_indent);
-
-                    put_literal("\"bytes\": [");
-
-                    if (!val.m_data.m_value.binary->empty())
-                    {
-                        for (auto i = val.m_data.m_value.binary->cbegin();
-                                i != val.m_data.m_value.binary->cend() - 1; ++i)
-                        {
-                            dump_byte(*i);
-                            put_literal(", ");
-                        }
-                        dump_byte(val.m_data.m_value.binary->back());
-                    }
-
-                    put_literal("],\n");
-                    put_indent(new_indent);
-
-                    put_literal("\"subtype\": ");
-                    if (val.m_data.m_value.binary->has_subtype())
-                    {
-                        dump_integer(val.m_data.m_value.binary->subtype());
-                    }
-                    else
-                    {
-                        put_literal("null");
-                    }
-                    put_char('\n');
-                    put_indent(current_indent);
-                    put_char('}');
-                }
-                else
-                {
-                    put_literal("{\"bytes\":[");
-
-                    if (!val.m_data.m_value.binary->empty())
-                    {
-                        for (auto i = val.m_data.m_value.binary->cbegin();
-                                i != val.m_data.m_value.binary->cend() - 1; ++i)
-                        {
-                            dump_byte(*i);
-                            put_char(',');
-                        }
-                        dump_byte(val.m_data.m_value.binary->back());
-                    }
-
-                    put_literal("],\"subtype\":");
-                    if (val.m_data.m_value.binary->has_subtype())
-                    {
-                        dump_integer(val.m_data.m_value.binary->subtype());
-                        put_char('}');
-                    }
-                    else
-                    {
-                        put_literal("null}");
-                    }
-                }
-                return;
-            }
-
             case value_t::boolean:
-            {
-                if (val.m_data.m_value.boolean)
-                {
-                    put_literal("true");
-                }
-                else
-                {
-                    put_literal("false");
-                }
-                return;
-            }
-
             case value_t::number_integer:
-            {
-                dump_integer(val.m_data.m_value.number_integer);
-                return;
-            }
-
             case value_t::number_unsigned:
-            {
-                dump_integer(val.m_data.m_value.number_unsigned);
-                return;
-            }
-
             case value_t::number_float:
-            {
-                dump_float(val.m_data.m_value.number_float);
-                return;
-            }
-
             case value_t::discarded:
-            {
-                put_literal("<discarded>");
-                return;
-            }
-
             case value_t::null:
-            {
-                put_literal("null");
+            default:
+                dump_scalar(val, current_indent);
                 return;
-            }
-
-            default:            // LCOV_EXCL_LINE
-                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
         }
     }
 
   private:
-    /// the number of levels @ref dump_internal descends into before it hands
-    /// over to @ref dump_iteratively
-    static constexpr std::size_t dump_depth_limit()
-    {
-        return 128;
-    }
-
     /*!
     @brief write out @a val and everything below it without the call stack
 
     Emits the same bytes as @ref dump_internal, keeping the containers it has
     entered on an explicit stack instead of descending into them. Only reached
-    for values nested deeper than @ref dump_depth_limit, which is why it is not
+    for values nested deeper than @ref recursion_depth_limit, which is why it is not
     written for speed: walking every value this way measured up to 20% slower on
     object-heavy documents than letting the compiler drive the descent.
     */
@@ -567,9 +440,9 @@ class serializer
     @brief serialize the value @a val, but not the elements of a container
 
     An object or array with elements is opened and pushed onto @a stack for
-    @ref dump_internal to walk; everything else - including a binary value,
+    @ref dump_iteratively to walk; everything else - including a binary value,
     which looks like an object but has no elements to descend into - is written
-    out here in full.
+    out in full by @ref dump_scalar.
     */
     void dump_value(const BasicJsonType& val,
                     const std::size_t current_indent,
@@ -627,6 +500,35 @@ class serializer
                 return;
             }
 
+            case value_t::string:
+            case value_t::binary:
+            case value_t::boolean:
+            case value_t::number_integer:
+            case value_t::number_unsigned:
+            case value_t::number_float:
+            case value_t::discarded:
+            case value_t::null:
+            default:
+                dump_scalar(val, current_indent);
+                return;
+        }
+    }
+
+    /*!
+    @brief serialize the value @a val, which is neither an object nor an array
+
+    Shared by @ref dump_internal and @ref dump_value, so that a value is written
+    the same way however deeply it is nested. A binary value is written out here
+    in full: it looks like an object, but has no elements to descend into.
+
+    @param[in] val             value to serialize; not an object or array
+    @param[in] current_indent  the indentation of @a val, used for a
+                               pretty-printed binary value
+    */
+    void dump_scalar(const BasicJsonType& val, const std::size_t current_indent)
+    {
+        switch (val.m_data.m_type)
+        {
             case value_t::string:
             {
                 put_char('"');
@@ -747,6 +649,8 @@ class serializer
                 return;
             }
 
+            case value_t::object: // LCOV_EXCL_LINE
+            case value_t::array:  // LCOV_EXCL_LINE
             default:            // LCOV_EXCL_LINE
                 JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
         }
@@ -775,11 +679,11 @@ class serializer
     Escape a string by replacing certain special characters by a sequence of an
     escape character (backslash) and another character and other control
     characters by a sequence of "\u" followed by a four-digit hex
-    representation. The escaped string is written to output stream @a o.
+    representation. The escaped string is appended to @ref write_buffer.
 
     @param[in] s  the string to escape
 
-    @complexity Linear in the length of string @a s.
+    Complexity: Linear in the length of string @a s.
     */
     void dump_escaped(const string_t& s)
     {
@@ -802,6 +706,11 @@ class serializer
     @a ensure_ascii is a template parameter here so that the branch on it is
     resolved once, outside the loop; see @ref dump_escaped.
     */
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(push)
+    // EnsureAscii is a template parameter; C++11 has no if constexpr
+#pragma warning(disable : 4127) // conditional expression is constant
+#endif
     template<bool EnsureAscii>
     void dump_escaped_impl(const string_t& s)
     {
@@ -928,6 +837,16 @@ class serializer
                             // EnsureAscii parameter is used, non-ASCII characters
                             if ((codepoint <= 0x1F) || (EnsureAscii && (codepoint >= 0x7F)))
                             {
+                                if (EnsureAscii && error_handler == error_handler_t::keep)
+                                {
+                                    // this character was buffered as raw bytes
+                                    // below in case it turned out to be part of
+                                    // an ill-formed sequence (which is kept as
+                                    // is); now that it decoded to a well-formed
+                                    // code point, undo that and \u-escape it
+                                    // like any other character instead
+                                    bytes = bytes_after_last_accept;
+                                }
                                 if (codepoint <= 0xFFFF)
                                 {
                                     write_u_escape(bytes, static_cast<std::uint16_t>(codepoint));
@@ -969,7 +888,7 @@ class serializer
                     {
                         case error_handler_t::strict:
                         {
-                            JSON_THROW(type_error::create(316, concat("invalid UTF-8 byte at index ", std::to_string(i), ": 0x", hex_bytes(byte | 0)), nullptr));
+                            JSON_THROW(type_error::create(exception_id::invalid_utf8, concat("invalid UTF-8 byte at index ", std::to_string(i), ": 0x", detail::hex_byte(byte)), nullptr));
                         }
 
                         case error_handler_t::ignore:
@@ -1002,9 +921,9 @@ class serializer
                                 }
                                 else
                                 {
-                                    string_buffer[bytes++] = detail::binary_writer<BasicJsonType, char>::to_char_type('\xEF');
-                                    string_buffer[bytes++] = detail::binary_writer<BasicJsonType, char>::to_char_type('\xBF');
-                                    string_buffer[bytes++] = detail::binary_writer<BasicJsonType, char>::to_char_type('\xBD');
+                                    string_buffer[bytes++] = '\xEF';
+                                    string_buffer[bytes++] = '\xBF';
+                                    string_buffer[bytes++] = '\xBD';
                                 }
 
                                 // write buffer and reset index; there must be 13 bytes
@@ -1026,6 +945,44 @@ class serializer
                             break;
                         }
 
+                        case error_handler_t::keep:
+                        {
+                            // the bytes of this (now abandoned) ill-formed
+                            // sequence seen so far are already buffered below
+                            // and are kept unchanged in the output
+                            if (undumped_chars > 0)
+                            {
+                                // the byte that ended the sequence may be OK
+                                // for itself (e.g., a quote that must still be
+                                // escaped, or the lead byte of a well-formed
+                                // code point), so read it again
+                                --i;
+                            }
+                            else
+                            {
+                                // a byte that cannot start a sequence (e.g.,
+                                // 0xFF or a stray continuation byte) is kept
+                                // as well
+                                string_buffer[bytes++] = s[i];
+                            }
+
+                            // write buffer and reset index; there must be 13 bytes
+                            // left, as this is the maximal number of bytes to be
+                            // written ("\uxxxx\uxxxx\0") for one code point
+                            if (string_buffer.size() - bytes < 13)
+                            {
+                                put_buffer(string_buffer, bytes);
+                                bytes = 0;
+                            }
+
+                            bytes_after_last_accept = bytes;
+                            undumped_chars = 0;
+
+                            // continue processing the string
+                            state = UTF8_ACCEPT;
+                            break;
+                        }
+
                         default:            // LCOV_EXCL_LINE
                             JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
                     }
@@ -1034,9 +991,12 @@ class serializer
 
                 default:  // decode found yet incomplete multibyte code point
                 {
-                    if (!EnsureAscii)
+                    if (!EnsureAscii || error_handler == error_handler_t::keep)
                     {
-                        // code point will not be escaped - copy byte to buffer
+                        // code point will not be escaped (or will be kept as
+                        // is if it turns out to be ill-formed) - copy byte to
+                        // buffer; dropped again above if it decodes to a
+                        // well-formed code point that needs \u-escaping
                         string_buffer[bytes++] = s[i];
                     }
                     ++undumped_chars;
@@ -1061,7 +1021,7 @@ class serializer
             {
                 case error_handler_t::strict:
                 {
-                    JSON_THROW(type_error::create(316, concat("incomplete UTF-8 string; last byte: 0x", hex_bytes(static_cast<std::uint8_t>(s[s.size() - 1] | 0))), nullptr));
+                    JSON_THROW(type_error::create(exception_id::invalid_utf8, concat("incomplete UTF-8 string; last byte: 0x", detail::hex_byte(static_cast<std::uint8_t>(s[s.size() - 1]))), nullptr));
                 }
 
                 case error_handler_t::ignore:
@@ -1087,11 +1047,22 @@ class serializer
                     break;
                 }
 
+                case error_handler_t::keep:
+                {
+                    // write the ill-formed trailing bytes as is; they were
+                    // buffered above regardless of EnsureAscii
+                    put_buffer(string_buffer, bytes);
+                    break;
+                }
+
                 default:            // LCOV_EXCL_LINE
                     JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
             }
         }
     }
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(pop)
+#endif
 
   private:
     /*!
@@ -1283,21 +1254,7 @@ class serializer
     }
 
     /*!
-     * @brief convert a byte to a uppercase hex representation
-     * @param[in] byte byte to represent
-     * @return representation ("00".."FF")
-     */
-    static std::string hex_bytes(std::uint8_t byte)
-    {
-        std::string result = "FF";
-        constexpr const char* nibble_to_hex = "0123456789ABCDEF";
-        result[0] = nibble_to_hex[byte / 16];
-        result[1] = nibble_to_hex[byte % 16];
-        return result;
-    }
-
-    /*!
-     * @brief write a lowercase "\uXXXX" escape sequence into @a string_buffer
+     * @brief write a lowercase "\\uXXXX" escape sequence into @a string_buffer
      *
      * Branch-free replacement for `snprintf(buf, 7, "\\u%04x", codeunit)` in the
      * string escaping hot path. It writes exactly six characters ('\\', 'u' and
@@ -1409,7 +1366,7 @@ class serializer
     /*!
     @brief dump an integer
 
-    Dump a given integer to output stream @a o. Works internally with
+    Dump a given integer, appending it to @ref write_buffer. Works internally with
     @a number_buffer.
 
     @param[in] x  integer number (signed or unsigned) to dump
@@ -1446,7 +1403,7 @@ class serializer
         }
 
         // use a pointer to fill the buffer
-        auto buffer_ptr = number_buffer.begin(); // NOLINT(llvm-qualified-auto,readability-qualified-auto,cppcoreguidelines-pro-type-vararg,hicpp-vararg)
+        auto buffer_ptr = number_buffer.begin(); // NOLINT(llvm-qualified-auto,readability-qualified-auto)
 
         number_unsigned_t abs_value;
 
@@ -1500,7 +1457,7 @@ class serializer
     /*!
     @brief dump a floating-point number
 
-    Dump a given floating-point number to output stream @a o. Works internally
+    Dump a given floating-point number, appending it to @ref write_buffer. Works internally
     with @a number_buffer.
 
     @param[in] x  floating-point number to dump
@@ -1561,21 +1518,28 @@ class serializer
         // check if the buffer was large enough
         JSON_ASSERT(static_cast<std::size_t>(len) < number_buffer.size());
 
+        // look up the locale's thousands separator and decimal point now,
+        // matching what snprintf_float() just used (see lexer::get_decimal_point())
+        const auto* loc = std::localeconv();
+        JSON_ASSERT(loc != nullptr);
+        const char thousands_sep = (loc->thousands_sep == nullptr) ? '\0' : *loc->thousands_sep;
+        const char decimal_point = (loc->decimal_point == nullptr) ? '\0' : *loc->decimal_point;
+
         // erase thousands separators
-        if (locale.thousands_sep != '\0')
+        if (thousands_sep != '\0')
         {
             // NOLINTNEXTLINE(readability-qualified-auto,llvm-qualified-auto): std::remove returns an iterator, see https://github.com/nlohmann/json/issues/3081
-            const auto end = std::remove(number_buffer.begin(), number_buffer.begin() + len, locale.thousands_sep);
+            const auto end = std::remove(number_buffer.begin(), number_buffer.begin() + len, thousands_sep);
             std::fill(end, number_buffer.end(), '\0');
             JSON_ASSERT((end - number_buffer.begin()) <= len);
             len = (end - number_buffer.begin());
         }
 
         // convert decimal point to '.'
-        if (locale.decimal_point != '\0' && locale.decimal_point != '.')
+        if (decimal_point != '\0' && decimal_point != '.')
         {
             // NOLINTNEXTLINE(readability-qualified-auto,llvm-qualified-auto): std::find returns an iterator, see https://github.com/nlohmann/json/issues/3081
-            const auto dec_pos = std::find(number_buffer.begin(), number_buffer.end(), locale.decimal_point);
+            const auto dec_pos = std::find(number_buffer.begin(), number_buffer.end(), decimal_point);
             if (dec_pos != number_buffer.end())
             {
                 *dec_pos = '.';
@@ -1596,62 +1560,6 @@ class serializer
         {
             put_literal(".0");
         }
-    }
-
-    /*!
-    @brief check whether a string is UTF-8 encoded
-
-    The function checks each byte of a string whether it is UTF-8 encoded. The
-    result of the check is stored in the @a state parameter. The function must
-    be called initially with state 0 (accept). State 1 means the string must
-    be rejected, because the current byte is not allowed. If the string is
-    completely processed, but the state is non-zero, the string ended
-    prematurely; that is, the last byte indicated more bytes should have
-    followed.
-
-    @param[in,out] state  the state of the decoding
-    @param[in,out] codep  codepoint (valid only if resulting state is UTF8_ACCEPT)
-    @param[in] byte       next byte to decode
-    @return               new state
-
-    @note The function has been edited: a std::array is used.
-
-    @copyright Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
-    @sa http://bjoern.hoehrmann.de/utf-8/decoder/dfa/
-    */
-    static std::uint8_t decode(std::uint8_t& state, std::uint32_t& codep, const std::uint8_t byte) noexcept
-    {
-        static const std::array<std::uint8_t, 400> utf8d =
-        {
-            {
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 00..1F
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 20..3F
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 40..5F
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 60..7F
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, // 80..9F
-                7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, // A0..BF
-                8, 8, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // C0..DF
-                0xA, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x3, 0x4, 0x3, 0x3, // E0..EF
-                0xB, 0x6, 0x6, 0x6, 0x5, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, 0x8, // F0..FF
-                0x0, 0x1, 0x2, 0x3, 0x5, 0x8, 0x7, 0x1, 0x1, 0x1, 0x4, 0x6, 0x1, 0x1, 0x1, 0x1, // s0..s0
-                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, // s1..s2
-                1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, // s3..s4
-                1, 2, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1, 3, 1, 1, 1, 1, 1, 1, // s5..s6
-                1, 3, 1, 1, 1, 1, 1, 3, 1, 3, 1, 1, 1, 1, 1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 // s7..s8
-            }
-        };
-
-        JSON_ASSERT(static_cast<std::size_t>(byte) < utf8d.size());
-        const std::uint8_t type = utf8d[byte];
-
-        codep = (state != UTF8_ACCEPT)
-                ? (byte & 0x3fu) | (codep << 6u)
-                : (0xFFu >> type) & (byte);
-
-        const std::size_t index = 256u + (static_cast<size_t>(state) * 16u) + static_cast<size_t>(type);
-        JSON_ASSERT(index < utf8d.size());
-        state = utf8d[index];
-        return state;
     }
 
     /*
@@ -1676,33 +1584,16 @@ class serializer
      */
     number_unsigned_t remove_sign(number_integer_t x) noexcept
     {
-        JSON_ASSERT(x < 0 && x < (std::numeric_limits<number_integer_t>::max)()); // NOLINT(misc-redundant-expression)
+        JSON_ASSERT(x < 0);
         return static_cast<number_unsigned_t>(-(x + 1)) + 1;
     }
 
   private:
-    /// the locale's thousand separator and decimal point characters
-    struct locale_chars
-    {
-        explicit locale_chars(const std::lconv* loc) noexcept
-            : thousands_sep(loc->thousands_sep == nullptr ? '\0' : std::char_traits<char>::to_char_type(* (loc->thousands_sep)))
-            , decimal_point(loc->decimal_point == nullptr ? '\0' : std::char_traits<char>::to_char_type(* (loc->decimal_point)))
-        {}
-
-        const char thousands_sep;
-        const char decimal_point;
-    };
-
     /// the output of the serializer (non-owning; the adapter lives at the call site)
     output_adapter_protocol<char>* o = nullptr;
 
     /// a (hopefully) large enough character buffer
     std::array<char, 64> number_buffer{{}};
-
-    /// computed once from std::localeconv() at construction; @ref
-    /// locale_chars keeps std::localeconv()'s pointer from having to be held
-    /// past the constructor, while still letting these stay const
-    const locale_chars locale;
 
     /// string buffer
     std::array<char, 512> string_buffer{{}};
@@ -1713,7 +1604,7 @@ class serializer
     /// whether to pretty-print the output
     const bool pretty_print;
 
-    /// whether to escape non-ASCII characters with \uXXXX sequences
+    /// whether to escape non-ASCII characters with \\uXXXX sequences
     const bool ensure_ascii;
 
     /// the indent level

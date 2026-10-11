@@ -22,7 +22,7 @@ namespace
 
 // std::deque has no capacity() member function, which the library only needs
 // to detect a reallocation for JSON_DIAGNOSTICS
-using deque_json = nlohmann::basic_json<std::map, std::deque>;
+using deque_json = nlohmann::json::with_array_t<std::deque>;
 
 // a std::vector whose at() is hidden: the library performs its own bounds
 // check and must not fall back to the container's checked accessor
@@ -39,7 +39,7 @@ class vector_without_at : public std::vector<T, Allocator>
     void at() = delete;
 };
 
-using no_at_json = nlohmann::basic_json<std::map, vector_without_at>;
+using no_at_json = nlohmann::json::with_array_t<vector_without_at>;
 
 } // namespace
 
@@ -115,6 +115,22 @@ TEST_CASE("array type without capacity()")
         // empty containers are flattened to null and cannot be restored
         const auto nested = deque_json::parse(R"({"a":[1,[2,3]]})");
         CHECK(nested.flatten().unflatten() == nested);
+    }
+
+    SECTION("insert(pos, initializer_list) compiles and works without reserve()")
+    {
+        // std::deque has no reserve() either; insert(pos, ilist) must not
+        // require it (regression test for #5656, which also covers an ilist
+        // that refers to elements of the array being inserted into)
+        deque_json j = deque_json::array();
+        j.push_back("a");
+        j.push_back("b");
+        j.push_back("c");
+
+        const deque_json& cj = j;
+        auto it = j.insert(j.begin(), {cj[0], cj[1]});
+        CHECK(*it == deque_json("a"));
+        CHECK(j == deque_json({"a", "b", "a", "b", "c"}));
     }
 
     SECTION("references stay valid while the array grows")

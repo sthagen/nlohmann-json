@@ -8,6 +8,14 @@
 
 #include "doctest_compatibility.h"
 
+// capture whether JSON_DELETE_DEPRECATED_FUNCTIONS was enabled on the command
+// line *before* including json.hpp, since the library #undefs it once the header
+// has been fully processed (see include/nlohmann/detail/macro_unscope.hpp); the
+// tests of deprecated functions are skipped if these functions are deleted
+#if defined(JSON_DELETE_DEPRECATED_FUNCTIONS) && (JSON_DELETE_DEPRECATED_FUNCTIONS == 1)
+    #define JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+#endif
+
 #include <nlohmann/json.hpp>
 using nlohmann::json;
 
@@ -15,85 +23,11 @@ using nlohmann::json;
 #include <fstream>
 #include <set>
 #include "make_test_data_available.hpp"
+#include "round_trip_corpus.hpp"
 #include "test_utils.hpp"
+#include "sax_countdown.hpp"
+using utils::SaxCountdown;
 
-namespace
-{
-class SaxCountdown
-{
-  public:
-    explicit SaxCountdown(const int count) : events_left(count)
-    {}
-
-    bool null()
-    {
-        return events_left-- > 0;
-    }
-
-    bool boolean(bool /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_integer(json::number_integer_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_unsigned(json::number_unsigned_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_float(json::number_float_t /*unused*/, const std::string& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool string(std::string& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool binary(std::vector<std::uint8_t>& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool start_object(std::size_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool key(std::string& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool end_object()
-    {
-        return events_left-- > 0;
-    }
-
-    bool start_array(std::size_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool end_array()
-    {
-        return events_left-- > 0;
-    }
-
-    bool parse_error(std::size_t /*unused*/, const std::string& /*unused*/, const json::exception& /*unused*/) // NOLINT(readability-convert-member-functions-to-static)
-    {
-        return false;
-    }
-
-  private:
-    int events_left = 0;
-};
-} // namespace
 
 TEST_CASE("UBJSON")
 {
@@ -101,10 +35,59 @@ TEST_CASE("UBJSON")
     {
         SECTION("discarded")
         {
-            // discarded values are not serialized
+            // a discarded value cannot be serialized to UBJSON
             json const j = json::value_t::discarded;
-            const auto result = json::to_ubjson(j);
-            CHECK(result.empty());
+            CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] cannot serialize discarded value to UBJSON", json::type_error&);
+        }
+
+        SECTION("discarded values nested in a container")
+        {
+            json const discarded = json::value_t::discarded;
+
+            SECTION("in an array")
+            {
+                json const j = {1, discarded, 2};
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] (/1) cannot serialize discarded value to UBJSON", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] cannot serialize discarded value to UBJSON", json::type_error&);
+#endif
+            }
+
+            SECTION("as an object value")
+            {
+                json j;
+                j["a"] = 1;
+                j["b"] = discarded;
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] (/b) cannot serialize discarded value to UBJSON", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] cannot serialize discarded value to UBJSON", json::type_error&);
+#endif
+            }
+
+            SECTION("nested deeper (array in object in array)")
+            {
+                json inner_array = {1, discarded};
+                json middle_object;
+                middle_object["x"] = inner_array;
+                json const j = {middle_object};
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] (/0/x/1) cannot serialize discarded value to UBJSON", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j), "[json.exception.type_error.321] cannot serialize discarded value to UBJSON", json::type_error&);
+#endif
+            }
+
+            SECTION("optimized array of all-discarded elements")
+            {
+                json const j = {discarded, discarded};
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j, true, true), "[json.exception.type_error.321] (/0) cannot serialize discarded value to UBJSON", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_ubjson(j, true, true), "[json.exception.type_error.321] cannot serialize discarded value to UBJSON", json::type_error&);
+#endif
+            }
         }
 
         SECTION("null")
@@ -264,7 +247,7 @@ TEST_CASE("UBJSON")
 
                 SECTION("-32768..-129 (int16)")
                 {
-                    for (int32_t i = -32768; i <= -129; ++i)
+                    for (int32_t i = -32768; i <= -129; i = utils::next_integer_sample(i, -129, 7))
                     {
                         CAPTURE(i)
 
@@ -424,7 +407,7 @@ TEST_CASE("UBJSON")
 
                 SECTION("256..32767 (int16)")
                 {
-                    for (size_t i = 256; i <= 32767; ++i)
+                    for (size_t i = 256; i <= 32767; i = utils::next_integer_sample(i, static_cast<size_t>(32767), static_cast<size_t>(7)))
                     {
                         CAPTURE(i)
 
@@ -630,7 +613,7 @@ TEST_CASE("UBJSON")
 
                 SECTION("256..32767 (int16)")
                 {
-                    for (size_t i = 256; i <= 32767; ++i)
+                    for (size_t i = 256; i <= 32767; i = utils::next_integer_sample(i, static_cast<size_t>(32767), static_cast<size_t>(7)))
                     {
                         CAPTURE(i)
 
@@ -819,6 +802,32 @@ TEST_CASE("UBJSON")
                     CHECK_THROWS_WITH_AS(_ = json::from_ubjson(vec2), "[json.exception.parse_error.115] parse error at byte 5: syntax error while parsing UBJSON high-precision number: invalid number text: 1A", json::parse_error);
                     std::vector<uint8_t> const vec3 = {'H', 'i', 2, '1', '.'};
                     CHECK_THROWS_WITH_AS(_ = json::from_ubjson(vec3), "[json.exception.parse_error.115] parse error at byte 5: syntax error while parsing UBJSON high-precision number: invalid number text: 1.", json::parse_error);
+                    // Reject NULs where they are read, including trailing NULs and payloads cut off after one.
+                    SECTION("NUL in high-precision number (issue #5753)")
+                    {
+                        for (const auto& vec : std::vector<std::vector<uint8_t>>
+                    {
+                        {'H', 'i', 3, '1', 0, 'x'},
+                        {'H', 'i', 2, '1', 0},
+                        {'H', 'i', 3, '1', 0}
+                    })
+                        {
+                            CAPTURE(vec)
+                            CHECK_THROWS_WITH_AS(_ = json::from_ubjson(vec), "[json.exception.parse_error.115] parse error at byte 5: syntax error while parsing UBJSON high-precision number: invalid number text; last byte: 0x00", json::parse_error);
+                            CHECK(json::from_ubjson(vec, true, false).is_discarded());
+                            CHECK(json::from_ubjson(vec, false, false).is_discarded());
+                        }
+
+                        std::vector<uint8_t> const nested = {'[', 'H', 'i', 3, '1', 0, 'x', ']'};
+                        CHECK_THROWS_WITH_AS(_ = json::from_ubjson(nested), "[json.exception.parse_error.115] parse error at byte 6: syntax error while parsing UBJSON high-precision number: invalid number text; last byte: 0x00", json::parse_error);
+                        CHECK(json::from_ubjson(nested, true, false).is_discarded());
+
+                        std::vector<uint8_t> const valid = {'H', 'i', 1, '1'};
+                        const auto j = json::from_ubjson(valid);
+                        CHECK(j.is_number_unsigned());
+                        CHECK(j == json(1));
+                    }
+
                     std::vector<uint8_t> const vec_overflow = {'H', 'i', 5, '1', 'e', '4', '0', '0'};
                     CHECK_THROWS_WITH_AS(_ = json::from_ubjson(vec_overflow), "[json.exception.out_of_range.406] number overflow parsing '1e400'", json::out_of_range&);
                     std::vector<uint8_t> const vec4 = {'H', 2, '1', '0'};
@@ -1639,6 +1648,29 @@ TEST_CASE("UBJSON")
                 });
                 CHECK_THROWS_AS(_ = json::sax_parse(v_ubjson, &scp, json::input_format_t::ubjson), json::out_of_range&);
             }
+
+            SECTION("array with a known size, read with a callback")
+            {
+                // a sized array announces its length to start_array()
+                std::vector<uint8_t> const v_ubjson = {'[', '#', 'i', 2, 'i', 1, 'i', 2};
+                json j;
+                nlohmann::detail::json_sax_dom_callback_parser<json, decltype(nlohmann::detail::input_adapter(v_ubjson))> scp(j, [](int /*unused*/, json::parse_event_t /*unused*/, const json& /*unused*/) noexcept
+                {
+                    return true;
+                });
+                CHECK(json::sax_parse(v_ubjson, &scp, json::input_format_t::ubjson));
+                CHECK(j == json({1, 2}));
+
+                // the readers reject a size this large before they announce
+                // it, so it can only reach start_array() directly (the largest
+                // value stands for an unknown size and is never checked)
+                json k;
+                nlohmann::detail::json_sax_dom_callback_parser<json, decltype(nlohmann::detail::input_adapter(v_ubjson))> scp2(k, [](int /*unused*/, json::parse_event_t /*unused*/, const json& /*unused*/) noexcept
+                {
+                    return true;
+                });
+                CHECK_THROWS_AS(scp2.start_array((std::numeric_limits<std::size_t>::max)() - 1), json::out_of_range&);
+            }
         }
     }
 
@@ -2142,9 +2174,14 @@ TEST_CASE("UBJSON")
 
         SECTION("discarded")
         {
+            // a discarded value cannot be serialized to UBJSON, even as part
+            // of an optimized array of a single (here: valueless) type
             json const j = {json::value_t::discarded, json::value_t::discarded};
-            std::vector<uint8_t> expected = {'[', '$', 'N', '#', 'i', 2};
-            CHECK(json::to_ubjson(j, true, true) == expected);
+#if JSON_DIAGNOSTICS
+            CHECK_THROWS_WITH_AS(json::to_ubjson(j, true, true), "[json.exception.type_error.321] (/0) cannot serialize discarded value to UBJSON", json::type_error&);
+#else
+            CHECK_THROWS_WITH_AS(json::to_ubjson(j, true, true), "[json.exception.type_error.321] cannot serialize discarded value to UBJSON", json::type_error&);
+#endif
         }
     }
 }
@@ -2254,6 +2291,48 @@ TEST_CASE("UBJSON nesting does not consume the call stack")
     }
 }
 
+TEST_CASE("UBJSON input that cannot be read is discarded by every overload")
+{
+    std::vector<std::uint8_t> input = json::to_ubjson(json({{"a", {1, 2}}}));
+    input.pop_back();
+
+    json _;
+    CHECK_THROWS_AS(_ = json::from_ubjson(input.begin(), input.end()), json::parse_error&);
+    CHECK(json::from_ubjson(input, true, false).is_discarded());
+    CHECK(json::from_ubjson(input.begin(), input.end(), true, false).is_discarded());
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+    CHECK(json::from_ubjson(input.data(), input.size(), true, false).is_discarded());
+    CHECK(json::from_ubjson({input.data(), input.size()}, true, false).is_discarded());
+#endif
+}
+
+TEST_CASE("UBJSON SAX parsing stops at every event")
+{
+    // Containers are opened and closed by the loop that reads them; a SAX
+    // handler that rejects any event - including the end of a nested
+    // container - must stop the parse right there.
+    const auto count_events = [](const std::vector<std::uint8_t>& input)
+    {
+        int events = 0;
+        while (true)
+        {
+            SaxCountdown scp(events);
+            if (json::sax_parse(input, &scp, json::input_format_t::ubjson))
+            {
+                return events;
+            }
+            ++events;
+            REQUIRE(events < 1000);
+        }
+    };
+
+    // 20 events: every container kind closes inside another one
+    const json j = json::parse(R"({"a": [1, {"b": []}], "c": {"d": [[2]]}})");
+    CHECK(count_events(json::to_ubjson(j)) == 20);
+    CHECK(count_events(json::to_ubjson(j, true)) == 20);
+    CHECK(count_events(json::to_ubjson(j, true, true)) == 20);
+}
+
 TEST_CASE("UBJSON optimized arrays of a valueless type are bounded")
 {
     // An element of type 'Z', 'T' or 'F' is encoded by its marker alone, so an
@@ -2265,7 +2344,9 @@ TEST_CASE("UBJSON optimized arrays of a valueless type are bounded")
 
     SECTION("an excessive count is rejected")
     {
-        // 'l' is a big-endian int32: 0x7FFFFFFF elements, about 34 GB of value
+        // 'l' is a big-endian int32: 0x7FFFFFFF elements, about 34 GB of value;
+        // OSS-Fuzz reported this shape as a parse_ubjson_fuzzer timeout
+        // (testcase 6347769435193344, no issue filed)
         for (const auto marker :
                 {'Z', 'T', 'F'
                 })
@@ -2513,6 +2594,43 @@ TEST_CASE("Universal Binary JSON Specification Examples 1")
             std::vector<uint8_t> const v = {'S', 'i', 10, 0xD9, 0x85, 0xD8, 0xB1, 0xD8, 0xAD, 0xD8, 0xA8, 0xD8, 0xA7};
             CHECK(json::to_ubjson(j) == v);
             CHECK(json::from_ubjson(v) == j);
+        }
+
+        SECTION("ill-formed UTF-8 (see #5529, #5651)")
+        {
+            // none of the binary format specs requires a decoder to reject
+            // ill-formed UTF-8 in a text string, so a value whose bytes are
+            // not valid UTF-8 (0xC0 0xAE is an overlong encoding of '.')
+            // round-trips byte for byte as a string value; to_ubjson() writes
+            // the bytes unchanged, as before 3.13.0, unless
+            // JSON_STRICT_BINARY_UTF8 is enabled (see
+            // unit-binary_utf8_strict.cpp)
+            const std::vector<uint8_t> v = {'S', 'i', 2, 0xc0, 0xae};
+            json j;
+            CHECK_NOTHROW(j = json::from_ubjson(v));
+            REQUIRE(j.is_string());
+            CHECK(j.get_ref<const json::string_t&>() == std::string("\xc0\xae"));
+            CHECK_THROWS_AS(utils::ignore_return_value(j.dump()), json::type_error&);
+            CHECK(json::from_ubjson(json::to_ubjson(j)) == j);
+
+            // the same bytes as an object key round-trip as well
+            const std::vector<uint8_t> v_key = {'{', 'i', 2, 0xc0, 0xae, 'i', 1, '}'};
+            json j_key;
+            CHECK_NOTHROW(j_key = json::from_ubjson(v_key));
+            REQUIRE(j_key.is_object());
+            CHECK(j_key.contains(std::string("\xc0\xae")));
+            CHECK(json::from_ubjson(json::to_ubjson(j_key)) == j_key);
+
+            CHECK(json::from_ubjson(json::to_ubjson(json("\xFF"))) == json("\xFF"));
+            // a truncated multi-byte sequence
+            CHECK(json::from_ubjson(json::to_ubjson(json("\xC3"))) == json("\xC3"));
+            // an encoded surrogate half (U+D800)
+            CHECK(json::from_ubjson(json::to_ubjson(json("\xED\xA0\x80"))) == json("\xED\xA0\x80"));
+            // an overlong encoding of '.'
+            CHECK(json::from_ubjson(json::to_ubjson(json("\xC0\xAF"))) == json("\xC0\xAF"));
+
+            // an object key with ill-formed UTF-8 is kept the same way
+            CHECK(json::from_ubjson(json::to_ubjson(json{{"\xFF", 1}})) == json{{"\xFF", 1}});
         }
     }
 
@@ -2817,6 +2935,51 @@ TEST_CASE("UBJSON use_type requires use_size")
     }
 }
 
+TEST_CASE("UBJSON round-trip invariants")
+{
+    // This checks what the parse_ubjson_fuzzer driver checks (see
+    // tests/src/fuzzer-parse_ubjson.cpp), so that a regression shows up in CI
+    // rather than as an OSS-Fuzz report: every value from_ubjson() returns
+    // (j1) can be serialized with any combination of options, the result can
+    // be parsed back (j2), and serializing j2 again with the same options
+    // reproduces the exact bytes. Beyond the driver, this also checks that j2
+    // equals j1. Values are compared with dump() rather than operator==,
+    // because a NaN never compares equal to itself.
+    struct options
+    {
+        bool use_size;
+        bool use_type;
+    };
+    const std::vector<options> all_options =
+    {
+        {false, false},
+        {true, false},
+        {true, true},
+    };
+
+    for (const auto& j0 : utils::round_trip_corpus::values())
+    {
+        // turn the corpus value into a value as from_ubjson() returns it; this
+        // has no binary values, as UBJSON writes them as arrays of integers
+        for (const auto& initial : all_options)
+        {
+            const json j1 = json::from_ubjson(json::to_ubjson(j0, initial.use_size, initial.use_type));
+
+            for (const auto& o : all_options)
+            {
+                INFO("j1 = " << j1.dump() << ", use_size = " << o.use_size << ", use_type = " << o.use_type);
+
+                const std::vector<std::uint8_t> vec = json::to_ubjson(j1, o.use_size, o.use_type);
+                json j2;
+                // anything the library writes must be parsable by the library
+                REQUIRE_NOTHROW(j2 = json::from_ubjson(vec));
+                CHECK(j2.dump() == j1.dump());
+                CHECK(json::to_ubjson(j2, o.use_size, o.use_type) == vec);
+            }
+        }
+    }
+}
+
 TEST_CASE("UBJSON roundtrips" * doctest::skip())
 {
     SECTION("input from self-generated UBJSON files")
@@ -2869,60 +3032,36 @@ TEST_CASE("UBJSON roundtrips" * doctest::skip())
         {
             CAPTURE(filename)
 
+            std::ifstream f_json(filename);
+            json const j1 = json::parse(f_json);
+            auto const packed = utils::read_binary_file(filename + ".ubjson");
+
             {
                 INFO_WITH_TEMP(filename + ": std::vector<uint8_t>");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                json const j1 = json::parse(f_json);
-
-                // parse UBJSON file
-                auto const packed = utils::read_binary_file(filename + ".ubjson");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_ubjson(packed));
-
-                // compare parsed JSON values
                 CHECK(j1 == j2);
             }
 
             {
                 INFO_WITH_TEMP(filename + ": std::ifstream");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                json const j1 = json::parse(f_json);
-
-                // parse UBJSON file
                 std::ifstream f_ubjson(filename + ".ubjson", std::ios::binary);
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_ubjson(f_ubjson));
-
-                // compare parsed JSON values
                 CHECK(j1 == j2);
             }
 
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
             {
                 INFO_WITH_TEMP(filename + ": uint8_t* and size");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                const json j1 = json::parse(f_json);
-
-                // parse UBJSON file
-                auto const packed = utils::read_binary_file(filename + ".ubjson");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_ubjson({packed.data(), packed.size()}));
-
-                // compare parsed JSON values
                 CHECK(j1 == j2);
             }
+#endif
 
             {
                 INFO_WITH_TEMP(filename + ": output to output adapters");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                json const j1 = json::parse(f_json);
-
-                // parse UBJSON file
-                auto const packed = utils::read_binary_file(filename + ".ubjson");
-
                 {
                     INFO_WITH_TEMP(filename + ": output adapters: std::vector<uint8_t>");
                     std::vector<uint8_t> vec;
@@ -2930,6 +3069,282 @@ TEST_CASE("UBJSON roundtrips" * doctest::skip())
                     CHECK(vec == packed);
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("UBJSON optimized array of unsigned integers beyond int64")
+{
+    // UBJSON has no unsigned 64-bit type, so such values are written as
+    // high-precision numbers - also as the type of an optimized container
+    const json j = {18446744073709551615ULL, 9223372036854775808ULL};
+    const std::vector<std::uint8_t> expected =
+    {
+        '[', '$', 'H', '#', 'i', 2,
+        'i', 20, '1', '8', '4', '4', '6', '7', '4', '4', '0', '7', '3', '7', '0', '9', '5', '5', '1', '6', '1', '5',
+        'i', 19, '9', '2', '2', '3', '3', '7', '2', '0', '3', '6', '8', '5', '4', '7', '7', '5', '8', '0', '8'
+    };
+    CHECK(json::to_ubjson(j, true, true) == expected);
+    CHECK(json::from_ubjson(expected) == j);
+}
+
+namespace
+{
+// the bytes that follow the marker of an integer: the value in the width of
+// the marker (big endian for UBJSON, little endian for BJData), or, for a
+// high-precision number, the length and the decimal digits
+std::vector<std::uint8_t> integer_payload(const char marker, const json& value, const bool little_endian)
+{
+    std::size_t width = 0;
+    switch (marker)
+    {
+        case 'i':
+        case 'U':
+            width = 1;
+            break;
+        case 'I':
+        case 'u':
+            width = 2;
+            break;
+        case 'l':
+        case 'm':
+            width = 4;
+            break;
+        case 'L':
+        case 'M':
+            width = 8;
+            break;
+        default:
+        {
+            const std::string digits = value.dump();
+            std::vector<std::uint8_t> result = {'i', static_cast<std::uint8_t>(digits.size())};
+            for (const char c : digits)
+            {
+                result.push_back(static_cast<std::uint8_t>(c));
+            }
+            return result;
+        }
+    }
+
+    const std::uint64_t bits = value.is_number_unsigned()
+                               ? value.get<std::uint64_t>()
+                               : static_cast<std::uint64_t>(value.get<std::int64_t>());
+    std::vector<std::uint8_t> result(width);
+    for (std::size_t i = 0; i < width; ++i)
+    {
+        result[little_endian ? i : width - 1 - i] = static_cast<std::uint8_t>(bits >> (8 * i));
+    }
+    return result;
+}
+
+json i64(const std::int64_t v)
+{
+    return v;
+}
+
+json u64(const std::uint64_t v)
+{
+    return v;
+}
+} // namespace
+
+TEST_CASE("UBJSON and BJData integer markers at every range edge")
+{
+    // An optimized container announces the marker of its values after `$` and
+    // then writes every value without a marker, so the marker the writer
+    // announces and the width it writes must match for every value. This
+    // checks both for the values around each edge of the integer types, as
+    // scalars and as the values of optimized arrays and objects.
+    struct integer_case
+    {
+        json value;
+        char ubjson; // expected UBJSON marker
+        char bjdata; // expected BJData marker
+    };
+
+    const std::int64_t int64_min = (std::numeric_limits<std::int64_t>::min)();
+    const std::int64_t int64_max = (std::numeric_limits<std::int64_t>::max)();
+    const std::uint64_t uint64_max = (std::numeric_limits<std::uint64_t>::max)();
+
+    const std::vector<integer_case> cases =
+    {
+        // int8
+        {i64(-129), 'I', 'I'},
+        {i64(-128), 'i', 'i'},
+        {i64(-127), 'i', 'i'},
+        {i64(-1), 'i', 'i'},
+        {i64(0), 'i', 'i'},
+        {u64(0), 'i', 'i'},
+        {i64(126), 'i', 'i'},
+        {i64(127), 'i', 'i'},
+        {u64(127), 'i', 'i'},
+        {i64(128), 'U', 'U'},
+        {u64(128), 'U', 'U'},
+        // uint8
+        {i64(254), 'U', 'U'},
+        {i64(255), 'U', 'U'},
+        {u64(255), 'U', 'U'},
+        {i64(256), 'I', 'I'},
+        {u64(256), 'I', 'I'},
+        // int16
+        {i64(-32769), 'l', 'l'},
+        {i64(-32768), 'I', 'I'},
+        {i64(-32767), 'I', 'I'},
+        {i64(32766), 'I', 'I'},
+        {i64(32767), 'I', 'I'},
+        {u64(32767), 'I', 'I'},
+        {i64(32768), 'l', 'u'},
+        {u64(32768), 'l', 'u'},
+        // uint16 (BJData only)
+        {i64(65534), 'l', 'u'},
+        {i64(65535), 'l', 'u'},
+        {u64(65535), 'l', 'u'},
+        {i64(65536), 'l', 'l'},
+        {u64(65536), 'l', 'l'},
+        // int32
+        {i64(-2147483649LL), 'L', 'L'},
+        {i64(-2147483648LL), 'l', 'l'},
+        {i64(-2147483647LL), 'l', 'l'},
+        {i64(2147483646LL), 'l', 'l'},
+        {i64(2147483647LL), 'l', 'l'},
+        {u64(2147483647ULL), 'l', 'l'},
+        {i64(2147483648LL), 'L', 'm'},
+        {u64(2147483648ULL), 'L', 'm'},
+        // uint32 (BJData only)
+        {i64(4294967294LL), 'L', 'm'},
+        {i64(4294967295LL), 'L', 'm'},
+        {u64(4294967295ULL), 'L', 'm'},
+        {i64(4294967296LL), 'L', 'L'},
+        {u64(4294967296ULL), 'L', 'L'},
+        // int64
+        {i64(int64_min), 'L', 'L'},
+        {i64(int64_min + 1), 'L', 'L'},
+        {i64(int64_max - 1), 'L', 'L'},
+        {i64(int64_max), 'L', 'L'},
+        {u64(static_cast<std::uint64_t>(int64_max)), 'L', 'L'},
+        // uint64 (BJData only; UBJSON writes a high-precision number)
+        {u64(static_cast<std::uint64_t>(int64_max) + 1), 'H', 'M'},
+        {u64(uint64_max - 1), 'H', 'M'},
+        {u64(uint64_max), 'H', 'M'},
+    };
+
+    for (const auto& c : cases)
+    {
+        for (const bool bjdata :
+                {
+                    false, true
+                })
+        {
+            const char marker = bjdata ? c.bjdata : c.ubjson;
+            const std::vector<std::uint8_t> payload = integer_payload(marker, c.value, bjdata);
+            const auto to_binary = [bjdata](const json & j, const bool use_size, const bool use_type)
+            {
+                return bjdata ? json::to_bjdata(j, use_size, use_type) : json::to_ubjson(j, use_size, use_type);
+            };
+            const auto from_binary = [bjdata](const std::vector<std::uint8_t>& v)
+            {
+                return bjdata ? json::from_bjdata(v) : json::from_ubjson(v);
+            };
+            INFO("value = " << c.value.dump() << (c.value.is_number_unsigned() ? " (unsigned)" : "") << ", format = " << (bjdata ? "BJData" : "UBJSON"));
+
+            // scalar
+            std::vector<std::uint8_t> expected = {static_cast<std::uint8_t>(marker)};
+            expected.insert(expected.end(), payload.begin(), payload.end());
+            for (const bool use_size :
+                    {
+                        false, true
+                    })
+            {
+                CHECK(to_binary(c.value, use_size, false) == expected);
+            }
+            CHECK(from_binary(expected) == c.value);
+
+            const json arr = {c.value, c.value, c.value};
+
+            // array without count or type: every value has its marker
+            expected = {'['};
+            for (int i = 0; i < 3; ++i)
+            {
+                expected.push_back(static_cast<std::uint8_t>(marker));
+                expected.insert(expected.end(), payload.begin(), payload.end());
+            }
+            expected.push_back(']');
+            CHECK(to_binary(arr, false, false) == expected);
+            CHECK(from_binary(expected) == arr);
+
+            // array with count: every value has its marker
+            expected = {'[', '#', 'i', 3};
+            for (int i = 0; i < 3; ++i)
+            {
+                expected.push_back(static_cast<std::uint8_t>(marker));
+                expected.insert(expected.end(), payload.begin(), payload.end());
+            }
+            CHECK(to_binary(arr, true, false) == expected);
+            CHECK(from_binary(expected) == arr);
+
+            // array with type and count: the marker once, then the payloads
+            expected = {'[', '$', static_cast<std::uint8_t>(marker), '#', 'i', 3};
+            for (int i = 0; i < 3; ++i)
+            {
+                expected.insert(expected.end(), payload.begin(), payload.end());
+            }
+            CHECK(to_binary(arr, true, true) == expected);
+            CHECK(from_binary(expected) == arr);
+
+            // object with type and count: the marker once, then key and payload
+            const json obj = {{"a", c.value}, {"b", c.value}};
+            expected = {'{', '$', static_cast<std::uint8_t>(marker), '#', 'i', 2};
+            for (const char key :
+                    {'a', 'b'
+                    })
+            {
+                expected.push_back('i');
+                expected.push_back(1);
+                expected.push_back(static_cast<std::uint8_t>(key));
+                expected.insert(expected.end(), payload.begin(), payload.end());
+            }
+            CHECK(to_binary(obj, true, true) == expected);
+            CHECK(from_binary(expected) == obj);
+        }
+    }
+}
+
+TEST_CASE("UBJSON large strings (chunked reader)")
+{
+    // get_ubjson_string() reads through get_string(), which reads in bounded
+    // chunks (binary_reader.hpp, chunk_size == 4096); make sure roundtripping
+    // is correct for lengths around and beyond that chunk size, for both
+    // vector (iterator) and pointer inputs.
+    //
+    // A binary value is not included here: plain UBJSON (unlike BJData, see
+    // the "BJData large strings and binaries" test) has no reader-side binary
+    // type, so even the optimized uint8_t-array encoding of a binary value is
+    // read back element-by-element as a JSON array of numbers rather than
+    // through get_binary() - it never reaches the chunked path this test is
+    // about (see the "roundtrip only works to an array of numbers" case
+    // above).
+    for (const std::size_t len :
+            {
+                std::size_t{0}, std::size_t{1}, std::size_t{4095}, std::size_t{4096},
+                std::size_t{4097}, std::size_t{8192}, std::size_t{100000}
+            })
+    {
+        CAPTURE(len)
+
+        const json j_string = std::string(len, 'x');
+        const std::vector<std::uint8_t> v_string = json::to_ubjson(j_string);
+        CHECK(json::from_ubjson(v_string) == j_string);
+        // pointer input exercises the std::memcpy fast path
+        CHECK(json::from_ubjson(reinterpret_cast<const char*>(v_string.data()),
+                                reinterpret_cast<const char*>(v_string.data()) + v_string.size()) == j_string);
+
+        // a truncated payload must still be reported as an error
+        if (len > 16)
+        {
+            std::vector<std::uint8_t> truncated = v_string;
+            truncated.resize(truncated.size() - 8);
+            json _;
+            CHECK_THROWS_AS(_ = json::from_ubjson(truncated), json::parse_error);
         }
     }
 }

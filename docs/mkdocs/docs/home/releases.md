@@ -4,6 +4,11 @@ This page summarizes the notable changes of every release and links to the relev
 The **complete release notes** — including all changes, the download files, and their checksums — are
 published on the [GitHub releases page](https://github.com/nlohmann/json/releases).
 
+!!! info "Unreleased changes"
+
+    This documentation is built from the `develop` branch and may describe changes that are not part of a release
+    yet. Their version numbers are followed by an <span class="unreleased-version">unreleased</span> badge.
+
 ## v3.12.0 (2025-04-11)
 
 Fixes bugs found in 3.11.3 and adds several features. All changes are backward-compatible.
@@ -21,7 +26,7 @@ Fixes bugs found in 3.11.3 and adds several features. All changes are backward-c
   [BJData](../features/binary_formats/bjdata.md) draft 3 and unsigned 64-bit integers for
   [BSON](../features/binary_formats/bson.md).
 - Adds multidimensional C-array conversion and UTF-8 encoded `std::filesystem::path` conversions, and
-  lowers the minimum [CMake](../integration/cmake.md) version to allow CMake 4.0.
+  raises the minimum [CMake](../integration/cmake.md) version to 3.5 and supports CMake 4.0.
 
 [Full release notes](https://github.com/nlohmann/json/releases/tag/v3.12.0).
 

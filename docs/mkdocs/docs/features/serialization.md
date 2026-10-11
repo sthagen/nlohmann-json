@@ -28,7 +28,7 @@ std::cout << j << std::endl;
 By default, `dump` produces the most compact representation without any superfluous whitespace. Passing a non-negative
 `indent` argument pretty-prints the output with the given number of spaces per level:
 
-??? example
+??? example "Example: pretty-print JSON values with `dump()`"
 
     ```cpp
     --8<-- "examples/dump.cpp"
@@ -64,8 +64,9 @@ serialization fails by default. The fourth argument of `dump` selects an
 - `strict` (default) — throw a [`type_error.316`](../home/exceptions.md#jsonexceptiontype_error316) exception.
 - `replace` — replace invalid bytes with the Unicode replacement character U+FFFD (`�`).
 - `ignore` — silently drop invalid bytes.
+- `keep` — copy invalid bytes to the output unchanged; the result is not valid UTF-8.
 
-??? example
+??? example "Example: serialize invalid UTF-8 with different error handlers"
 
     ```cpp
     --8<-- "examples/error_handler_t.cpp"
@@ -117,7 +118,7 @@ For the [{fmt}](https://github.com/fmtlib/fmt) library, the library ships a
 ## Serializing to other formats
 
 Besides JSON text, a value can also be serialized to the more compact [binary formats](binary_formats/index.md)
-(BJData, BSON, CBOR, MessagePack, UBJSON).
+(BJData, BON8, BSON, CBOR, MessagePack, UBJSON).
 
 ## See also
 

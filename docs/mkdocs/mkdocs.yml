@@ -63,6 +63,7 @@ nav:
       - Binary Formats:
           - features/binary_formats/index.md
           - features/binary_formats/bjdata.md
+          - features/binary_formats/bon8.md
           - features/binary_formats/bson.md
           - features/binary_formats/cbor.md
           - features/binary_formats/messagepack.md
@@ -84,12 +85,14 @@ nav:
       - features/modules.md
       - 'nlohmann Namespace': features/namespace.md
       - features/object_order.md
+      - features/performance.md
       - Parsing:
           - features/parsing/index.md
           - features/parsing/json_lines.md
           - features/parsing/parse_exceptions.md
           - features/parsing/parser_callbacks.md
           - features/parsing/sax_interface.md
+          - features/parsing/untrusted_input.md
       - features/assertions.md
       - features/serialization.md
       - features/enum_conversion.md
@@ -105,6 +108,7 @@ nav:
       - integration/cmake.md
       - integration/package_managers.md
       - integration/pkg-config.md
+      - integration/compile_times.md
   - API Documentation:
       - basic_json:
           - 'Overview': api/basic_json/index.md
@@ -113,6 +117,7 @@ nav:
           - 'accept': api/basic_json/accept.md
           - 'array': api/basic_json/array.md
           - 'array_t': api/basic_json/array_t.md
+          - 'as_base_class': api/basic_json/as_base_class.md
           - 'at': api/basic_json/at.md
           - 'back': api/basic_json/back.md
           - 'begin': api/basic_json/begin.md
@@ -142,6 +147,7 @@ nav:
           - 'flatten': api/basic_json/flatten.md
           - 'format_as': api/basic_json/format_as.md
           - 'from_bjdata': api/basic_json/from_bjdata.md
+          - 'from_bon8': api/basic_json/from_bon8.md
           - 'from_bson': api/basic_json/from_bson.md
           - 'from_cbor': api/basic_json/from_cbor.md
           - 'from_msgpack': api/basic_json/from_msgpack.md
@@ -213,6 +219,7 @@ nav:
           - 'swap': api/basic_json/swap.md
           - 'std::swap&lt;basic_json&gt;': api/basic_json/std_swap.md
           - 'to_bjdata': api/basic_json/to_bjdata.md
+          - 'to_bon8': api/basic_json/to_bon8.md
           - 'to_bson': api/basic_json/to_bson.md
           - 'to_cbor': api/basic_json/to_cbor.md
           - 'to_msgpack': api/basic_json/to_msgpack.md
@@ -225,11 +232,14 @@ nav:
           - 'update': api/basic_json/update.md
           - 'value': api/basic_json/value.md
           - 'value_t': api/basic_json/value_t.md
+          - 'with_t': api/basic_json/with_t.md
       - byte_container_with_subtype:
           - 'Overview': api/byte_container_with_subtype/index.md
           - '(constructor)': api/byte_container_with_subtype/byte_container_with_subtype.md
           - 'clear_subtype': api/byte_container_with_subtype/clear_subtype.md
           - 'has_subtype': api/byte_container_with_subtype/has_subtype.md
+          - 'operator==': api/byte_container_with_subtype/operator_eq.md
+          - 'operator!=': api/byte_container_with_subtype/operator_ne.md
           - 'set_subtype': api/byte_container_with_subtype/set_subtype.md
           - 'subtype': api/byte_container_with_subtype/subtype.md
       - adl_serializer:
@@ -246,6 +256,7 @@ nav:
           - 'operator string_t': api/json_pointer/operator_string_t.md
           - 'operator==': api/json_pointer/operator_eq.md
           - 'operator!=': api/json_pointer/operator_ne.md
+          - 'operator<=>': api/json_pointer/operator_spaceship.md
           - 'operator/': api/json_pointer/operator_slash.md
           - 'operator/=': api/json_pointer/operator_slasheq.md
           - 'parent_pointer': api/json_pointer/parent_pointer.md
@@ -282,21 +293,30 @@ nav:
           - 'JSON_BRACE_INIT_COPY_SEMANTICS': api/macros/json_brace_init_copy_semantics.md
           - 'JSON_CATCH_USER, JSON_THROW_USER, JSON_TRY_USER': api/macros/json_throw_user.md
           - 'JSON_DIAGNOSTICS': api/macros/json_diagnostics.md
+          - 'JSON_DELETE_DEPRECATED_FUNCTIONS': api/macros/json_delete_deprecated_functions.md
           - 'JSON_DIAGNOSTIC_POSITIONS': api/macros/json_diagnostic_positions.md
           - 'JSON_DISABLE_ENUM_SERIALIZATION': api/macros/json_disable_enum_serialization.md
-          - 'JSON_HAS_CPP_11, JSON_HAS_CPP_14, JSON_HAS_CPP_17, JSON_HAS_CPP_20': api/macros/json_has_cpp_11.md
+          - 'JSON_DISABLE_TUPLE_REFERENCE_CONVERSION': api/macros/json_disable_tuple_reference_conversion.md
+          - 'JSON_HAS_CPP_11, JSON_HAS_CPP_14, JSON_HAS_CPP_17, JSON_HAS_CPP_20, JSON_HAS_CPP_23, JSON_HAS_CPP_26': api/macros/json_has_cpp_11.md
           - 'JSON_HAS_EXPERIMENTAL_FILESYSTEM, JSON_HAS_FILESYSTEM': api/macros/json_has_filesystem.md
+          - 'JSON_HAS_RANGE_VIEW_CONVERSION': api/macros/json_has_range_view_conversion.md
           - 'JSON_HAS_RANGES': api/macros/json_has_ranges.md
           - 'JSON_HAS_STATIC_RTTI': api/macros/json_has_static_rtti.md
           - 'JSON_HAS_STD_FORMAT': api/macros/json_has_std_format.md
           - 'JSON_HAS_THREE_WAY_COMPARISON': api/macros/json_has_three_way_comparison.md
+          - 'JSON_NO_AUTOMATIC_UDLS': api/macros/json_no_automatic_udls.md
           - 'JSON_NOEXCEPTION': api/macros/json_noexception.md
           - 'JSON_NO_IO': api/macros/json_no_io.md
+          - 'JSON_NO_THREAD_LOCAL': api/macros/json_no_thread_local.md
+          - 'JSON_PRECISE_STREAM_POSITION': api/macros/json_precise_stream_position.md
           - 'JSON_SKIP_LIBRARY_VERSION_CHECK': api/macros/json_skip_library_version_check.md
           - 'JSON_SKIP_UNSUPPORTED_COMPILER_CHECK': api/macros/json_skip_unsupported_compiler_check.md
+          - 'JSON_STRICT_BINARY_UTF8': api/macros/json_strict_binary_utf8.md
+          - 'JSON_STRICT_NUL_HANDLING': api/macros/json_strict_nul_handling.md
           - 'JSON_USE_GLOBAL_UDLS': api/macros/json_use_global_udls.md
           - 'JSON_USE_IMPLICIT_CONVERSIONS': api/macros/json_use_implicit_conversions.md
           - 'JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON': api/macros/json_use_legacy_discarded_value_comparison.md
+          - 'JSON_USE_OBJECTS_FOR_ENUM_KEYED_MAPS': api/macros/json_use_objects_for_enum_keyed_maps.md
           - 'JSON_USE_SIMDUTF': api/macros/json_use_simdutf.md
           - 'NLOHMANN_DEFINE_DERIVED_TYPE_INTRUSIVE, NLOHMANN_DEFINE_DERIVED_TYPE_INTRUSIVE_WITH_DEFAULT, NLOHMANN_DEFINE_DERIVED_TYPE_INTRUSIVE_ONLY_SERIALIZE, NLOHMANN_DEFINE_DERIVED_TYPE_NON_INTRUSIVE, NLOHMANN_DEFINE_DERIVED_TYPE_NON_INTRUSIVE_WITH_DEFAULT, NLOHMANN_DEFINE_DERIVED_TYPE_NON_INTRUSIVE_ONLY_SERIALIZE': api/macros/nlohmann_define_derived_type.md
           - 'NLOHMANN_DEFINE_TYPE_INTRUSIVE, NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT, NLOHMANN_DEFINE_TYPE_INTRUSIVE_ONLY_SERIALIZE': api/macros/nlohmann_define_type_intrusive.md
@@ -315,7 +335,9 @@ nav:
       - community/contribution_guidelines.md
       - community/quality_assurance.md
       - community/governance.md
+      - community/roadmap.md
       - community/security_policy.md
+      - community/assurance_case.md
 
 # Extras
 extra:
@@ -341,7 +363,6 @@ markdown_extensions:
   - toc:
       permalink: true
   - md_in_html
-  - pymdownx.arithmatex
   - pymdownx.betterem:
       smart_enable: all
   - pymdownx.caret
@@ -371,8 +392,21 @@ markdown_extensions:
       auto_append:
         - ../includes/glossary.md
 
+# report broken links, anchors, and nav entries as warnings, so that `mkdocs build --strict` (make build) fails
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
 hooks:
   - hooks/copy_markdown_source.py
+  - hooks/unreleased_versions.py
 
 plugins:
   - search:
@@ -380,7 +414,8 @@ plugins:
       lang: en
   - minify:
       minify_html: true
-  - git-revision-date-localized
+  - git-revision-date-localized:
+      strict: false  # log "has no git logs" for uncommitted pages as info, not as a warning
   - redirects:
       redirect_maps:
         'api/basic_json/operator_gtgt.md': api/operator_gtgt.md
@@ -391,9 +426,25 @@ plugins:
         'home/code_of_conduct.md': community/code_of_conduct.md
   - htmlproofer: # see https://github.com/manuzhang/mkdocs-htmlproofer-plugin
       enabled: !ENV [ENABLED_HTMLPROOFER, False]
+      raise_error_after_finish: true   # log every broken link, then fail
+      skip_downloads: true             # check headers only (customers.md links large PDFs)
+      raise_error_excludes:            # integer status codes, fnmatch patterns
+        403: ['*']                     # bot protection against the plugin's "Bot <uuid>" user agent
+        429: ['*']                     # rate limiting (hundreds of github.com URLs)
+        502: ['*']
+        503: ['*']
+        504: ['*']                     # timeouts are reported as 504
+        -1:                            # connection errors
+          - 'https://repology.org/*'   # repology.org is suspended since 2026-09
+          - 'http://2ak5ape.257.cz/'   # customers.md: kept although unreachable
+        401: ['https://fossies.org/*'] # answers the plugin's user agent with 401, browsers and curl with 200
+        404:
+          - 'https://gitlab.b-data.ch/*' # answers the plugin's user agent with 404, browsers with 200
+          # customers.md: kept although dead
+          - 'https://www.cisco.com/c/dam/en_us/about/doing_business/open_source/docs/CiscoWebexDeskCamera-23-1622100417.pdf'
+          - 'https://docs.cyberark.com/Downloads/Legal/Privileged%20Session%20Manager%20for%20SSH%20Third-Party%20Notices.pdf'
+        500: ['https://marne.io/licenses'] # customers.md: kept although dead
       ignore_urls:
-        - http://nlohmann.github.io/json/*
-        - https://nlohmann.github.io/json/*
         - mailto:*
   - privacy:
       # repology.org refuses requests from GitHub Actions runners, which made
@@ -407,7 +458,7 @@ plugins:
       markdown_description: >
         JSON for Modern C++ is a C++11 header-only library implementing a JSON
         value type with an STL-like API, JSON Pointer/Patch, CBOR/MessagePack/
-        BSON/UBJSON/BJData binary format support, and a SAX-style parser interface.
+        BSON/UBJSON/BJData/BON8 binary format support, and a SAX-style parser interface.
       sections:
         Home:
           - index.md
@@ -433,6 +484,3 @@ plugins:
 
 extra_css:
   - css/custom.css
-
-extra_javascript:
-  - https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML

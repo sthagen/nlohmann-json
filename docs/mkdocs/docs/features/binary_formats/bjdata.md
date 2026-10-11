@@ -61,7 +61,16 @@ The library uses the following mapping from JSON values types to BJData types ac
 
     The following values can **not** be converted to a BJData value:
 
-      - strings with more than 18446744073709551615 bytes, i.e., $2^{64}-1$ bytes (theoretical)
+      - strings with more than 18446744073709551615 bytes, i.e., 2<sup>64</sup>-1 bytes (theoretical)
+
+!!! warning "UTF-8 validation of string values and object keys"
+
+    BJData strings must use UTF-8 encoding. By default (the [`error_handler`](../../api/basic_json/to_bjdata.md)
+    parameter left at `keep`), `to_bjdata()` writes the bytes of string values and object keys unchanged, even if they
+    are not valid UTF-8. With `error_handler_t::strict`, it throws
+    [`type_error.316`](../../home/exceptions.md#jsonexceptiontype_error316) for ill-formed UTF-8 instead;
+    `replace`/`ignore` sanitize the string. [`JSON_STRICT_BINARY_UTF8`](../../api/macros/json_strict_binary_utf8.md)
+    makes `strict` the default.
 
 !!! info "Unused BJData markers"
 
@@ -73,7 +82,7 @@ The library uses the following mapping from JSON values types to BJData types ac
 !!! info "NaN/infinity handling"
 
     If NaN or Infinity are stored inside a JSON number, they are serialized properly. This behavior differs from the
-    `dump()` function which serializes NaN or Infinity to `#!json null`.
+    [`dump()`](../../api/basic_json/dump.md) function which serializes NaN or Infinity to `#!json null`.
 
 !!! info "Endianness"
 
@@ -116,20 +125,30 @@ The library uses the following mapping from JSON values types to BJData types ac
     ```
 
     Likewise, when a JSON object in the above form is serialized using
-    [`to_bjdata`](../../api/basic_json/to_bjdata.md), it is automatically converted into a compact BJData ND-array. When
-    the 1-dimensional vector stored in `"_ArraySize_"` contains a single integer or two integers with one being 1, a
-    regular 1-D optimized array is generated instead.
+    [`to_bjdata`](../../api/basic_json/to_bjdata.md), it is automatically converted into a compact BJData ND-array.
 
-    An object is only converted if the annotation actually describes a packed array; otherwise it is serialized as a
-    regular JSON object. This requires all of the following:
+    When parsing, an ND-array whose dimension vector is empty, contains a single integer, contains two integers with the
+    first being 1, or contains a 0 is returned as a regular (possibly empty) array rather than an annotated object.
+
+    An object is only converted if the annotation describes a packed array that is parsed back into the same annotated
+    object; otherwise it is serialized as a regular JSON object, so the annotation is never lost in a round trip. This requires
+    all of the following:
 
     - `"_ArrayType_"` is one of `uint8`, `int8`, `uint16`, `int16`, `uint32`, `int32`, `uint64`, `int64`, `single`,
       `double`, `char`, or `byte`,
     - `"_ArraySize_"` is an array, since the dimensions are written as the ND-array header's length,
-    - every entry of `"_ArraySize_"` is a non-negative integer, and their product is representable as a `std::size_t`,
-    - `"_ArrayData_"` holds exactly that many elements, and
-    - every element of `"_ArrayData_"` is a number of the kind named by `"_ArrayType_"` (a floating-point number for
-      `single` and `double`, an integer otherwise).
+    - `"_ArraySize_"` has at least two entries and is not a 1×N row vector (first entry 1), since other shapes are
+      parsed back as a regular array,
+    - every entry of `"_ArraySize_"` is a positive integer, and their product is representable as a `std::size_t`,
+    - `"_ArrayData_"` is an array holding exactly that many elements, and
+    - every element of `"_ArrayData_"` is a number of the kind named by `"_ArrayType_"`: for the integer types, a
+      value that fits the named width; for `double`, any value; for `single`, a value that survives narrowing to
+      `float` and back without change (for instance, `0.1` does not, since it is not exactly representable as
+      `float`).
+
+    An annotated object is always read back with its keys in the order shown above, `"_ArrayType_"`, `"_ArraySize_"`,
+    `"_ArrayData_"`, regardless of the order the ND-array's header stores them in on the wire. This matters for
+    `ordered_json`, whose comparison takes key order into account.
 
     The current version of this library does not yet support automatic detection of and conversion from a nested JSON
     array input to a BJData ND-array.
@@ -159,7 +178,7 @@ The library uses the following mapping from JSON values types to BJData types ac
 
     [BJDataBinArr]: https://github.com/NeuroJSON/bjdata/blob/master/Binary_JData_Specification.md#optimized-binary-array
 
-??? example
+??? example "Example: serialize JSON values to BJData, with and without size/type optimization"
 
     ```cpp
     --8<-- "examples/to_bjdata.cpp"
@@ -204,7 +223,30 @@ The library maps BJData types to JSON value types as follows:
 
     The mapping is **complete** in the sense that any BJData value can be converted to a JSON value.
 
-??? example
+!!! warning "Ill-formed UTF-8 in string values and object keys"
+
+    BJData strings must use UTF-8 encoding, but checking it on read is opt-in: with the
+    [`error_handler`](../../api/basic_json/from_bjdata.md) parameter left at `keep` (the default), `from_bjdata()`
+    accepts a string value or object key whose bytes are not valid UTF-8 and hands them back unchanged. Passing
+    `error_handler_t::strict` makes `from_bjdata()` check and throw
+    [`parse_error.113`](../../home/exceptions.md#jsonexceptionparse_error113) for ill-formed UTF-8, and
+    `replace`/`ignore` sanitize the string instead of keeping it. However,
+    [`dump()`](../../api/basic_json/dump.md) still requires valid UTF-8 and throws
+    [`type_error.316`](../../home/exceptions.md#jsonexceptiontype_error316) for a value read with the default
+    `keep` handler, unless an error handler is passed that replaces or ignores the ill-formed bytes. `to_bjdata()`'s
+    own `error_handler` parameter defaults to `keep` (see above), so such a value is written back unchanged.
+
+!!! info "Round trips"
+
+    A value returned by [`from_bjdata`](../../api/basic_json/from_bjdata.md) can be serialized with
+    [`to_bjdata`](../../api/basic_json/to_bjdata.md) using any combination of options and parsed back into an equal
+    value, and serializing that value again with the same options produces the same bytes. The exception is binary
+    values: they are only written as an optimized binary array (`[$B`) if Draft 3 is enabled and both `use_size` and
+    `use_type` are set. Otherwise, they are written as arrays of integers and parsed back as such (see the notes on
+    binary values above), and serializing such an array again may choose different, but equally valid, type markers.
+    The bytes can then differ, but parsing them again yields the same value.
+
+??? example "Example: deserialize a JSON value from BJData"
 
     ```cpp
     --8<-- "examples/from_bjdata.cpp"

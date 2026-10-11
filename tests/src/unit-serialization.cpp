@@ -8,6 +8,14 @@
 
 #include "doctest_compatibility.h"
 
+// capture whether JSON_DELETE_DEPRECATED_FUNCTIONS was enabled on the command
+// line *before* including json.hpp, since the library #undefs it once the header
+// has been fully processed (see include/nlohmann/detail/macro_unscope.hpp); the
+// tests of deprecated functions are skipped if these functions are deleted
+#if defined(JSON_DELETE_DEPRECATED_FUNCTIONS) && (JSON_DELETE_DEPRECATED_FUNCTIONS == 1)
+    #define JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+#endif
+
 #include <nlohmann/json.hpp>
 using nlohmann::json;
 
@@ -48,6 +56,7 @@ TEST_CASE("serialization")
         }
     }
 
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
     SECTION("operator>>")
     {
         SECTION("no given width")
@@ -79,6 +88,7 @@ TEST_CASE("serialization")
                   "[\n\t\"foo\",\n\t1,\n\t2,\n\t3,\n\tfalse,\n\t{\n\t\t\"one\": 1\n\t}\n]");
         }
     }
+#endif
 
     SECTION("dump")
     {
@@ -92,6 +102,18 @@ TEST_CASE("serialization")
             CHECK(j.dump(-1, ' ', false, json::error_handler_t::ignore) == "\"äü\"");
             CHECK(j.dump(-1, ' ', false, json::error_handler_t::replace) == "\"ä\xEF\xBF\xBDü\"");
             CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"\\u00e4\\ufffd\\u00fc\"");
+            CHECK(j.dump(-1, ' ', false, json::error_handler_t::keep) == "\"ä\xA9ü\"");
+            CHECK(j.dump(-1, ' ', true, json::error_handler_t::keep) == "\"\\u00e4\xA9\\u00fc\"");
+        }
+
+        SECTION("invalid character (regression guard for shared UTF-8 decoder, see #5529)")
+        {
+            // dump_escaped_impl() now calls the UTF-8 decoder shared with the
+            // binary readers (detail::decode() in string_utils.hpp) instead
+            // of a private copy; the exact type_error.316 message/behavior
+            // must stay byte-for-byte the same as before that extraction
+            const json j = "ä\xA9ü";
+            CHECK_THROWS_WITH_AS(utils::ignore_return_value(j.dump()), "[json.exception.type_error.316] invalid UTF-8 byte at index 2: 0xA9", json::type_error&);
         }
 
         SECTION("ending with incomplete character")
@@ -104,6 +126,8 @@ TEST_CASE("serialization")
             CHECK(j.dump(-1, ' ', false, json::error_handler_t::ignore) == "\"123\"");
             CHECK(j.dump(-1, ' ', false, json::error_handler_t::replace) == "\"123\xEF\xBF\xBD\"");
             CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"123\\ufffd\"");
+            CHECK(j.dump(-1, ' ', false, json::error_handler_t::keep) == "\"123\xC2\"");
+            CHECK(j.dump(-1, ' ', true, json::error_handler_t::keep) == "\"123\xC2\"");
         }
 
         SECTION("unexpected character")
@@ -116,6 +140,39 @@ TEST_CASE("serialization")
             CHECK(j.dump(-1, ' ', false, json::error_handler_t::ignore) == "\"123456\"");
             CHECK(j.dump(-1, ' ', false, json::error_handler_t::replace) == "\"123\xEF\xBF\xBD\x34\x35\x36\"");
             CHECK(j.dump(-1, ' ', true, json::error_handler_t::replace) == "\"123\\ufffd456\"");
+            CHECK(j.dump(-1, ' ', false, json::error_handler_t::keep) == "\"123\xF1\xB0\x34\x35\x36\"");
+            CHECK(j.dump(-1, ' ', true, json::error_handler_t::keep) == "\"123\xF1\xB0\x34\x35\x36\"");
+        }
+
+        SECTION("keep: valid characters are still escaped")
+        {
+            // an invalid byte followed by characters that must be escaped
+            const json j = "\xC2\"\\\n\xFF\x05";
+            CHECK(j.dump(-1, ' ', false, json::error_handler_t::keep) == "\"\xC2\\\"\\\\\\n\xFF\\u0005\"");
+            CHECK(j.dump(-1, ' ', true, json::error_handler_t::keep) == "\"\xC2\\\"\\\\\\n\xFF\\u0005\"");
+        }
+
+        SECTION("keep: truncated multibyte sequences")
+        {
+            CHECK(json("\xF0\x9F\x98").dump(-1, ' ', false, json::error_handler_t::keep) == "\"\xF0\x9F\x98\"");
+            CHECK(json("\xF0\x9F\x98").dump(-1, ' ', true, json::error_handler_t::keep) == "\"\xF0\x9F\x98\"");
+            CHECK(json("\xF0\x9F\x98" "a").dump(-1, ' ', false, json::error_handler_t::keep) == "\"\xF0\x9F\x98" "a\"");
+            CHECK(json("\xF0\x9F\x98" "a").dump(-1, ' ', true, json::error_handler_t::keep) == "\"\xF0\x9F\x98" "a\"");
+        }
+
+        SECTION("keep: long string with many invalid bytes")
+        {
+            // exceeds the internal string buffer several times
+            std::string input;
+            std::string expected = "\"";
+            for (int i = 0; i < 2000; ++i)
+            {
+                input += "\xFF\xE2\x82\n\xC3\xA4";
+                expected += "\xFF\xE2\x82\\n\xC3\xA4";
+            }
+            expected += "\"";
+            const json j = input;
+            CHECK(j.dump(-1, ' ', false, json::error_handler_t::keep) == expected);
         }
 
         SECTION("U+FFFD Substitution of Maximal Subparts")
@@ -310,8 +367,7 @@ TEST_CASE("dump for basic_json with long double number_float_t")
     // serializer::dump_float(x, std::false_type). That branch must use the
     // "%.*Lg" format specifier; using "%.*g" with a long double argument is
     // undefined behavior and corrupts the output.
-    using long_double_json = nlohmann::basic_json<std::map, std::vector, std::string,
-          bool, std::int64_t, std::uint64_t, long double>;
+    using long_double_json = nlohmann::json::with_float_t<long double>;
 
     SECTION("round-trip dump/parse")
     {
@@ -574,7 +630,7 @@ TEST_CASE("serialization of deeply nested values")
         // value are known to meet cleanly - wherever the bound is set.
         for (std::size_t d = 1; d <= 300; ++d)
         {
-            CAPTURE(d);
+            CAPTURE(d)
 
             const std::string array_text = std::string(d, '[') + '7' + std::string(d, ']');
             CHECK(json::parse(array_text).dump() == array_text);
@@ -594,7 +650,7 @@ TEST_CASE("serialization of deeply nested values")
     {
         for (std::size_t d = 120; d <= 140; ++d)
         {
-            CAPTURE(d);
+            CAPTURE(d)
 
             const json j = json::parse(std::string(d, '[') + '7' + std::string(d, ']'));
 
@@ -619,13 +675,355 @@ TEST_CASE("serialization of deeply nested values")
         // so it must not gain a newline when it is reached iteratively
         for (std::size_t d = 125; d <= 135; ++d)
         {
-            CAPTURE(d);
+            CAPTURE(d)
 
             const std::string compact = std::string(d, '[') + "[]" + std::string(d, ']');
             CHECK(json::parse(compact).dump() == compact);
 
             const std::string with_object = std::string(d, '[') + "{}" + std::string(d, ']');
             CHECK(json::parse(with_object).dump() == with_object);
+        }
+    }
+}
+
+namespace
+{
+// wraps @a inner into @a depth single-element arrays
+json wrap_in_arrays(const json& inner, const std::size_t depth)
+{
+    json j = inner;
+    for (std::size_t i = 0; i < depth; ++i)
+    {
+        j = json::array({std::move(j)});
+    }
+    return j;
+}
+
+// what wrap_in_arrays(inner, depth).dump(2) is expected to be: the arrays
+// around inner.dump(2), with inner's own lines indented by the depth
+std::string expected_pretty_in_arrays(const json& inner, const std::size_t depth)
+{
+    std::string expected;
+    for (std::size_t i = 0; i < depth; ++i)
+    {
+        expected += std::string(2 * i, ' ') + "[\n";
+    }
+
+    const std::string indent(2 * depth, ' ');
+    expected += indent;
+    for (const char c : inner.dump(2))
+    {
+        expected += c;
+        if (c == '\n')
+        {
+            expected += indent;
+        }
+    }
+
+    for (std::size_t i = depth; i > 0; --i)
+    {
+        expected += '\n' + std::string(2 * (i - 1), ' ') + ']';
+    }
+    return expected;
+}
+} // namespace
+
+TEST_CASE("serialization of every kind of value below the bound of the descent")
+{
+    // Values nested deeper than the bound are written without the call stack,
+    // by code of their own; each kind of value must come out the same there as
+    // it does at the top level, compact and pretty-printed.
+    std::vector<json> values =
+    {
+        json::parse(R"({"a": 1, "b": [1, 2, {"c": "x"}], "d": {}, "e": []})"),
+        json::parse(R"([1, [2, 3], {"k": null}, "s"])"),
+        json::object(),
+        json::array(),
+        json::binary({1, 2, 3}, 42),
+        json::binary({1, 2, 3}),
+        json::binary({}, 7),
+        json::binary({}),
+        "a string with \"escapes\"\n",
+        true,
+        false,
+        -42,
+        42u,
+        1.5,
+        nullptr,
+        json(json::value_t::discarded),
+    };
+    // a pretty-printed object whose members are themselves deep
+    values.push_back({{"x", wrap_in_arrays(1, 5)}, {"y", {{"z", 2}}}});
+
+    for (const std::size_t depth : std::vector<std::size_t> {1, 200})
+    {
+        CAPTURE(depth)
+        for (const auto& inner : values)
+        {
+            CAPTURE(inner.dump())
+            const json j = wrap_in_arrays(inner, depth);
+            CHECK(j.dump() == std::string(depth, '[') + inner.dump() + std::string(depth, ']'));
+            CHECK(j.dump(2) == expected_pretty_in_arrays(inner, depth));
+        }
+    }
+
+    SECTION("pretty-printed objects across the bound")
+    {
+        for (std::size_t d = 120; d <= 140; ++d)
+        {
+            CAPTURE(d)
+
+            // built from the inside out: {"k": <level below>, "n": <level>}
+            json j = 7;
+            std::string expected = "7";
+            for (std::size_t i = d; i > 0; --i)
+            {
+                j = json({{"k", std::move(j)}, {"n", i}});
+
+                const std::string indent(2 * i, ' ');
+                const std::string outer_indent(2 * (i - 1), ' ');
+                std::string next = "{\n";
+                next += indent;
+                next += "\"k\": ";
+                next += expected;
+                next += ",\n";
+                next += indent;
+                next += "\"n\": ";
+                next += std::to_string(i);
+                next += '\n';
+                next += outer_indent;
+                next += '}';
+                expected = std::move(next);
+            }
+
+            CHECK(j.dump(2) == expected);
+            CHECK(json::parse(j.dump(2)) == j);
+            CHECK(json::parse(j.dump()) == j);
+        }
+    }
+}
+
+TEST_CASE("serializer buffers are flushed mid-string and mid-binary")
+{
+    SECTION("a long run of escaped characters")
+    {
+        // each character is escaped on its own, so the escape buffer fills up
+        const json newlines = std::string(600, '\n');
+        std::string expected = "\"";
+        for (int i = 0; i < 600; ++i)
+        {
+            expected += "\\n";
+        }
+        expected += '"';
+        CHECK(newlines.dump() == expected);
+
+        // every character is \u-escaped under ensure_ascii
+        std::string umlauts;
+        std::string escaped_umlauts = "\"";
+        for (int i = 0; i < 300; ++i)
+        {
+            umlauts += "\xC3\xA4";
+            escaped_umlauts += "\\u00e4";
+        }
+        escaped_umlauts += '"';
+        CHECK(json(umlauts).dump(-1, ' ', true) == escaped_umlauts);
+    }
+
+    SECTION("a large binary value")
+    {
+        std::vector<std::uint8_t> bytes(3000);
+        std::string expected_bytes;
+        std::string expected_pretty_bytes;
+        for (std::size_t i = 0; i < bytes.size(); ++i)
+        {
+            bytes[i] = static_cast<std::uint8_t>(i % 256);
+            expected_bytes += (i == 0 ? "" : ",") + std::to_string(i % 256);
+            expected_pretty_bytes += (i == 0 ? "" : ", ") + std::to_string(i % 256);
+        }
+        const json j = json::binary(bytes);
+        CHECK(j.dump() == "{\"bytes\":[" + expected_bytes + "],\"subtype\":null}");
+        CHECK(j.dump(2) == "{\n  \"bytes\": [" + expected_pretty_bytes + "],\n  \"subtype\": null\n}");
+    }
+}
+
+TEST_CASE("serialization boundary values for the write buffer")
+{
+    // write_buffer is a std::array<char, 1024> (write_buffer_size). put_string()
+    // guards it with two checks, and each must be exercised exactly on and one
+    // past its own boundary: a heap overflow in a different manual buffer path
+    // (the dump(1100) indent buffer) once survived 100% line coverage because
+    // every test that touched it only ever grew the buffer by a single step,
+    // never landing on the exact edge of the comparison that protects it.
+    //
+    // - straight-through: put_string() bypasses write_buffer entirely and
+    //   writes directly to the output adapter once `length >= write_buffer.size()`.
+    // - flush-then-copy: otherwise, if `write_buffer_pos + length > write_buffer.size()`,
+    //   put_string() flushes what is pending and then memcpy's the new run into
+    //   the freshly emptied buffer.
+
+    SECTION("top-level string exercises the straight-through guard (length >= 1024)")
+    {
+        // dump() of a bare string writes the opening quote with put_char()
+        // (write_buffer_pos: 0 -> 1), then the body with put_string(). With
+        // write_buffer_pos == 1, `1 + length > 1024` and `length >= 1024` flip
+        // together at length 1024, so 1023/1024/1025 cover "just under",
+        // "exactly at" and "just over" the guard in one move: 1023 is copied
+        // into the buffer (filling it exactly), 1024 and 1025 bypass it.
+        for (const std::size_t len :
+                {
+                    std::size_t{1023}, std::size_t{1024}, std::size_t{1025}
+                })
+        {
+            CAPTURE(len)
+            const std::string body(len, 'a');
+            const json j = body;
+            const std::string expected = '"' + body + '"';
+
+            CHECK(j.dump() == expected);
+
+            std::ostringstream o;
+            o << j;
+            CHECK(o.str() == expected);
+        }
+    }
+
+    SECTION("string nested in an array exercises the flush-then-copy guard")
+    {
+        // json::array({body}) writes '[' then '"' before the body, so
+        // write_buffer_pos == 2 when put_string() is entered for it. The
+        // body's last byte then lands at logical offset 2 + len: len == 1022
+        // lands exactly on offset 1024 (2 + 1022 == write_buffer.size(), so the
+        // strict "> " guard does not fire and the body fits snugly), while
+        // len == 1023 lands one past it at offset 1025 (2 + 1023 > 1024),
+        // which must flush what's pending before copying the body in.
+        for (const std::size_t len :
+                {
+                    std::size_t{1022}, std::size_t{1023}
+                })
+        {
+            CAPTURE(len)
+            const std::string body(len, 'a');
+            const json j = json::array({body});
+            const std::string expected = "[\"" + body + "\"]";
+
+            CHECK(j.dump() == expected);
+
+            std::ostringstream o;
+            o << j;
+            CHECK(o.str() == expected);
+
+            CHECK(json::parse(j.dump()) == j);
+        }
+    }
+}
+
+TEST_CASE("serialization boundary values for the string buffer")
+{
+    // string_buffer is a std::array<char, 512>. dump_escaped_impl() flushes it
+    // mid-string once fewer than 13 bytes remain (`string_buffer.size() - bytes
+    // < 13`), 13 being one more than the most a single code point can ever
+    // write at once (a surrogate pair: two back-to-back "\uXXXX" escapes, 12
+    // bytes). Every write into string_buffer that this check protects happens
+    // in steps of 2 (a simple "\\x" escape) or 6 (one "\uXXXX" unit), so
+    // `bytes` only ever takes even values at the point the check runs - the
+    // tightest values actually reachable are therefore 498 (512 - 498 == 14,
+    // one simple escape away from the threshold) and 500 (512 - 500 == 12,
+    // where the flush fires immediately and resets bytes to 0).
+
+    SECTION("a run of 2-byte escapes lands bytes on, and one step past, the flush threshold")
+    {
+        for (const int count :
+                {
+                    249, 250, 251
+                })
+        {
+            CAPTURE(count)
+            const json j = std::string(static_cast<std::size_t>(count), '\n');
+            std::string expected = "\"";
+            for (int i = 0; i < count; ++i)
+            {
+                expected += "\\n";
+            }
+            expected += '"';
+            CHECK(j.dump() == expected);
+        }
+    }
+
+    SECTION("an ASCII prefix leaves the tightest reachable margin before a 12-byte surrogate pair")
+    {
+        // U+1F600 (the "\xF0\x9F\x98\x80" UTF-8 bytes) is dumped under
+        // ensure_ascii as the 12-byte surrogate pair "\ud83d\ude00"; that
+        // write happens in a single step with no intermediate flush check, so
+        // it is the write most exposed by an off-by-one in the "< 13" guard.
+        // A prefix of 249 newlines leaves exactly 14 bytes of headroom
+        // (512 - 498), the smallest margin the guard ever actually allows
+        // into a new code point; 250 newlines instead trigger the guard's own
+        // flush first, so the emoji starts from a freshly emptied (512-byte)
+        // buffer, and 251 repeats that with one more escape already past the
+        // reset. Together they cover the margin the guard allows landing on,
+        // one step before, and one step after - all must still produce the
+        // identical, correct escapes.
+        for (const int prefix_count :
+                {
+                    249, 250, 251
+                })
+        {
+            CAPTURE(prefix_count)
+            const std::string prefix(static_cast<std::size_t>(prefix_count), '\n');
+            const std::string emoji = "\xF0\x9F\x98\x80";
+            const json j = prefix + emoji;
+
+            std::string expected_prefix;
+            for (int i = 0; i < prefix_count; ++i)
+            {
+                expected_prefix += "\\n";
+            }
+
+            // newline escaping does not depend on ensure_ascii: only the
+            // emoji differs (raw UTF-8 bytes vs. a \u-escaped surrogate pair)
+            std::string expected_raw = "\"";
+            expected_raw += expected_prefix;
+            expected_raw += emoji;
+            expected_raw += '"';
+            std::string expected_ascii = "\"";
+            expected_ascii += expected_prefix;
+            expected_ascii += R"(\ud83d\ude00")";
+            CHECK(j.dump(-1, ' ', false) == expected_raw);
+            CHECK(j.dump(-1, ' ', true) == expected_ascii);
+            CHECK(json::parse(j.dump(-1, ' ', true)) == j);
+            CHECK(json::parse(j.dump(-1, ' ', false)) == j);
+        }
+    }
+
+    SECTION("SWAR bulk-copy stride: k plain bytes followed by a byte handled individually")
+    {
+        // string_bulk_run()/find_ascii_copyable_run() (string_scan.hpp) scan 8
+        // bytes at a time and fall back to a byte-at-a-time tail scan for
+        // what is left over. k from 0 to 17 spans zero, one and two full
+        // 8-byte strides plus a 1-byte tail, so every possible stopping point
+        // within and right after the SIMD stride is covered.
+        for (std::size_t k = 0; k <= 17; ++k)
+        {
+            CAPTURE(k)
+            const std::string prefix(k, 'a');
+
+            // (a) the run is stopped by a quote that must itself be escaped
+            {
+                const json j = prefix + "\"";
+                CHECK(j.dump() == '"' + prefix + "\\\"" + '"');
+            }
+
+            // (b) the run is stopped by a control character
+            {
+                const json j = prefix + "\x01";
+                CHECK(j.dump() == '"' + prefix + "\\u0001" + '"');
+            }
+
+            // (c) the run is stopped by a non-ASCII byte under ensure_ascii
+            {
+                const json j = prefix + "\xC3\xA9"; // prefix + 'é'
+                CHECK(j.dump(-1, ' ', true) == '"' + prefix + "\\u00e9" + '"');
+            }
         }
     }
 }

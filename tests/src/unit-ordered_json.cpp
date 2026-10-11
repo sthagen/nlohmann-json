@@ -82,6 +82,40 @@ TEST_CASE("regression test for issue #3732 - iteration_proxy_value<iter_impl<ord
     static_cast<void>(fn);
 }
 
+TEST_CASE("copying an ordered_json with nested values")
+{
+    // ordered_map is backed by a vector, so copying an object that has
+    // structured values takes a different route than copying a std::map-backed
+    // one; see https://github.com/nlohmann/json/issues/5387
+    ordered_json oj;
+    oj["z"] = 1;
+    oj["a"]["y"] = 2;
+    oj["a"]["b"]["x"] = 3;
+    oj["m"] = {1, 2, {{"w", 4}}};
+
+    const ordered_json copy(oj);
+
+    SECTION("the copy is equal to the original")
+    {
+        CHECK(copy == oj);
+        CHECK(copy.dump() == oj.dump());
+    }
+
+    SECTION("the key order is preserved at every level")
+    {
+        CHECK(copy.dump() == R"({"z":1,"a":{"y":2,"b":{"x":3}},"m":[1,2,{"w":4}]})");
+    }
+
+    SECTION("the copy is independent of the original")
+    {
+        ordered_json mutated(oj);
+        mutated["a"]["b"]["x"] = 99;
+
+        CHECK(oj["a"]["b"]["x"] == 3);
+        CHECK(mutated["a"]["b"]["x"] == 99);
+    }
+}
+
 TEST_CASE("regression test - diff() must account for ordered_json member order")
 {
     SECTION("pure reorder, no value changes")
@@ -160,5 +194,46 @@ TEST_CASE("regression test - diff() must account for ordered_json member order")
         auto p = json::diff(a, b);
         CHECK(p.empty());
         CHECK(a.patch(p) == b);
+    }
+}
+
+TEST_CASE("regression test for issue #5673 - ordered_json::emplace with a non-rvalue value")
+{
+    SECTION("lvalue value")
+    {
+        ordered_json oj = ordered_json::object();
+        ordered_json value = 1;
+        auto res = oj.emplace("a", value);
+        CHECK(res.second == true);
+        CHECK(oj.dump() == "{\"a\":1}");
+    }
+
+    SECTION("const lvalue value")
+    {
+        ordered_json oj = ordered_json::object();
+        const ordered_json value = 1;
+        auto res = oj.emplace("a", value);
+        CHECK(res.second == true);
+        CHECK(oj.dump() == "{\"a\":1}");
+    }
+
+    SECTION("rvalue value")
+    {
+        ordered_json oj = ordered_json::object();
+        auto res = oj.emplace("a", ordered_json(1));
+        CHECK(res.second == true);
+        CHECK(oj.dump() == "{\"a\":1}");
+    }
+
+    SECTION("existing key is not overwritten (std::map-compatible semantics)")
+    {
+        ordered_json oj = ordered_json::object();
+        ordered_json value = 1;
+        oj.emplace("a", value);
+
+        ordered_json other_value = 2;
+        auto res = oj.emplace("a", other_value);
+        CHECK(res.second == false);
+        CHECK(oj.dump() == "{\"a\":1}");
     }
 }

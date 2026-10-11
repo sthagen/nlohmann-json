@@ -8,6 +8,18 @@
 
 #include "doctest_compatibility.h"
 
+// capture whether JSON_STRICT_NUL_HANDLING was enabled on the command line
+// (e.g. -DJSON_STRICT_NUL_HANDLING=1) *before* including json.hpp, since the
+// library #undefs JSON_STRICT_NUL_HANDLING itself once the header has been
+// fully processed unless JSON_TEST_KEEP_MACROS is defined (see
+// include/nlohmann/detail/macro_unscope.hpp)
+#if defined(JSON_STRICT_NUL_HANDLING) && (JSON_STRICT_NUL_HANDLING == 1)
+    #define JSON_TEST_STRICT_NUL_HANDLING_ENABLED 1
+#endif
+
+#define JSON_TEST_STRINGIZE_EX(x) #x
+#define JSON_TEST_STRINGIZE(x) JSON_TEST_STRINGIZE_EX(x)
+
 #define JSON_TESTS_PRIVATE
 #include <nlohmann/json.hpp>
 using nlohmann::json;
@@ -25,194 +37,15 @@ using nlohmann::json;
 #include <utility>
 #include <vector>
 
+#include "sax_countdown.hpp"
+#include "sax_event_loggers.hpp"
 #include "test_utils.hpp"
+
+using utils::SaxCountdown;
+using utils::SaxEventLogger;
 
 namespace
 {
-class SaxEventLogger
-{
-  public:
-    bool null()
-    {
-        events.emplace_back("null()");
-        return true;
-    }
-
-    bool boolean(bool val)
-    {
-        events.emplace_back(val ? "boolean(true)" : "boolean(false)");
-        return true;
-    }
-
-    bool number_integer(json::number_integer_t val)
-    {
-        events.push_back("number_integer(" + std::to_string(val) + ")");
-        return true;
-    }
-
-    bool number_unsigned(json::number_unsigned_t val)
-    {
-        events.push_back("number_unsigned(" + std::to_string(val) + ")");
-        return true;
-    }
-
-    bool number_float(json::number_float_t /*unused*/, const std::string& s)
-    {
-        events.push_back("number_float(" + s + ")");
-        return true;
-    }
-
-    bool string(std::string& val)
-    {
-        events.push_back("string(" + val + ")");
-        return true;
-    }
-
-    bool binary(json::binary_t& val)
-    {
-        std::string binary_contents = "binary(";
-        std::string comma_space;
-        for (auto b : val)
-        {
-            binary_contents.append(comma_space);
-            binary_contents.append(std::to_string(static_cast<int>(b)));
-            comma_space = ", ";
-        }
-        binary_contents.append(")");
-        events.push_back(binary_contents);
-        return true;
-    }
-
-    bool start_object(std::size_t elements)
-    {
-        if (elements == (std::numeric_limits<std::size_t>::max)())
-        {
-            events.emplace_back("start_object()");
-        }
-        else
-        {
-            events.push_back("start_object(" + std::to_string(elements) + ")");
-        }
-        return true;
-    }
-
-    bool key(std::string& val)
-    {
-        events.push_back("key(" + val + ")");
-        return true;
-    }
-
-    bool end_object()
-    {
-        events.emplace_back("end_object()");
-        return true;
-    }
-
-    bool start_array(std::size_t elements)
-    {
-        if (elements == (std::numeric_limits<std::size_t>::max)())
-        {
-            events.emplace_back("start_array()");
-        }
-        else
-        {
-            events.push_back("start_array(" + std::to_string(elements) + ")");
-        }
-        return true;
-    }
-
-    bool end_array()
-    {
-        events.emplace_back("end_array()");
-        return true;
-    }
-
-    bool parse_error(std::size_t position, const std::string& /*unused*/, const json::exception& /*unused*/)
-    {
-        errored = true;
-        events.push_back("parse_error(" + std::to_string(position) + ")");
-        return false;
-    }
-
-    std::vector<std::string> events {}; // NOLINT(readability-redundant-member-init)
-    bool errored = false;
-};
-
-class SaxCountdown : public nlohmann::json::json_sax_t
-{
-  public:
-    explicit SaxCountdown(const int count) : events_left(count)
-    {}
-
-    bool null() override
-    {
-        return events_left-- > 0;
-    }
-
-    bool boolean(bool /*val*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_integer(json::number_integer_t /*val*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_unsigned(json::number_unsigned_t /*val*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_float(json::number_float_t /*val*/, const std::string& /*s*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool string(std::string& /*val*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool binary(json::binary_t& /*val*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool start_object(std::size_t /*elements*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool key(std::string& /*val*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool end_object() override
-    {
-        return events_left-- > 0;
-    }
-
-    bool start_array(std::size_t /*elements*/) override
-    {
-        return events_left-- > 0;
-    }
-
-    bool end_array() override
-    {
-        return events_left-- > 0;
-    }
-
-    bool parse_error(std::size_t /*position*/, const std::string& /*last_token*/, const json::exception& /*ex*/) override
-    {
-        return false;
-    }
-
-  private:
-    int events_left = 0;
-};
-
 json parser_helper(const std::string& s);
 bool accept_helper(const std::string& s);
 void comments_helper(const std::string& s);
@@ -543,6 +376,161 @@ TEST_CASE("parser class")
                 CHECK(parser_helper("\"\\ud80c\\udc60\"").get<json::string_t>() == "\xf0\x93\x81\xa0");
                 CHECK(parser_helper("\"\\ud83c\\udf1e\"").get<json::string_t>() == "🌞");
             }
+        }
+
+        SECTION("NUL byte handling (issue #5530, JSON_STRICT_NUL_HANDLING)")
+        {
+            // by default, a NUL byte anywhere in the input (not inside a quoted
+            // string, which is covered above) is silently treated the same as
+            // real end of input; JSON_STRICT_NUL_HANDLING (off by default, see
+            // docs/mkdocs/docs/api/macros/json_strict_nul_handling.md) makes a
+            // NUL byte an error like any other unexpected byte instead.
+            //
+            // The two sections below are mutually exclusive: this whole test
+            // binary is compiled once, with JSON_STRICT_NUL_HANDLING either
+            // left at its default or forced to 1 (e.g. by the dedicated
+            // ci_test_strict_nul_handling CI target), so only the section
+            // matching the actual, compiled-in behavior can pass.
+            SECTION("the macro is part of the ABI tag")
+            {
+                const std::string ns = JSON_TEST_STRINGIZE(NLOHMANN_JSON_NAMESPACE);
+#if defined(JSON_TEST_STRICT_NUL_HANDLING_ENABLED)
+                CHECK(ns.find("_snul") != std::string::npos);
+#else
+                CHECK(ns.find("_snul") == std::string::npos);
+#endif
+            }
+
+#if !defined(JSON_TEST_STRICT_NUL_HANDLING_ENABLED)
+            SECTION("default behavior (macro not enabled)")
+            {
+                // a NUL byte after a complete value silently truncates the input
+                std::string s = "123";
+                s.push_back('\0');
+                s += "4";
+                CHECK(json::parse(s) == json(123));
+                CHECK(json::accept(s));
+
+                // parsing from a string literal is unaffected either way
+                CHECK(json::parse("123") == json(123));
+
+                // a NUL byte that ends a // comment ends the input just
+                // like a NUL byte anywhere else (issue #5659); before the
+                // fix, the NUL was consumed as part of the comment, and
+                // scanning continued with whatever followed it
+                {
+                    // same as "//c" alone (real end of input after the
+                    // comment), rather than continuing with "[1]"
+                    std::string s1 = "//c";
+                    s1.push_back('\0');
+                    s1 += "[1]";
+                    json _; // NOLINT(readability-identifier-naming)
+                    CHECK_THROWS_WITH_AS(_ = json::parse(s1, nullptr, true, true),
+                                         "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal",
+                                         json::parse_error&);
+                    CHECK_FALSE(json::accept(s1, true, true));
+                }
+
+                {
+                    // same as "[1, //c" alone, rather than continuing with " 2]"
+                    std::string s2 = "[1, //c";
+                    s2.push_back('\0');
+                    s2 += " 2]";
+                    json _; // NOLINT(readability-identifier-naming)
+                    CHECK_THROWS_WITH_AS(_ = json::parse(s2, nullptr, true, true),
+                                         "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal",
+                                         json::parse_error&);
+                    CHECK_FALSE(json::accept(s2, true, true));
+                }
+
+                {
+                    // same as "1 //c" alone: the comment (and the NUL that
+                    // ends it) is ignored, and "x" is never reached
+                    std::string s3 = "1 //c";
+                    s3.push_back('\0');
+                    s3 += "x";
+                    CHECK(json::parse(s3, nullptr, true, true) == json(1));
+                    CHECK(json::accept(s3, true, true));
+                }
+            }
+#endif
+
+#if defined(JSON_TEST_STRICT_NUL_HANDLING_ENABLED)
+            SECTION("opt-in strict behavior (JSON_STRICT_NUL_HANDLING == 1)")
+            {
+                // a NUL byte after a complete value is now a parse error,
+                // instead of silently truncating the input
+                {
+                    std::string s = "123";
+                    s.push_back('\0');
+                    json _; // NOLINT(readability-identifier-naming)
+                    CHECK_THROWS_WITH_AS(_ = json::parse(s),
+                                         "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - invalid literal; last read: '123<U+0000>'; expected end of input",
+                                         json::parse_error&);
+                    CHECK_FALSE(json::accept(s));
+                }
+
+                // a NUL byte where a value is expected is now a parse error,
+                // instead of being treated the same as an empty input
+                {
+                    const std::string s(1, '\0');
+                    json _; // NOLINT(readability-identifier-naming)
+                    CHECK_THROWS_WITH_AS(_ = json::parse(s),
+                                         "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - invalid literal; last read: '<U+0000>'",
+                                         json::parse_error&);
+                    CHECK_FALSE(json::accept(s));
+                }
+
+                // a NUL byte inside a // comment no longer stops the comment
+                // scan early; scanning continues correctly past it
+                {
+                    std::string s = "1 // a";
+                    s.push_back('\0');
+                    s += "b\n";
+                    CHECK(json::parse(s, nullptr, true, true) == json(1));
+                    CHECK(json::accept(s, true, true));
+                }
+
+                // a NUL byte inside a /* */ comment no longer stops the
+                // comment scan early either
+                {
+                    std::string s = "1 /* a";
+                    s.push_back('\0');
+                    s += "b */ ";
+                    CHECK(json::parse(s, nullptr, true, true) == json(1));
+                    CHECK(json::accept(s, true, true));
+                }
+
+                // regression guard: parsing from a string literal (which
+                // carries a compiler-appended trailing '\0') still works,
+                // even though a NUL byte is now rejected everywhere else
+                CHECK(json::parse("123") == json(123));
+
+                // regression test for issue #5658: the same holds for wide,
+                // UTF-16, UTF-32, and (C++20) UTF-8 string literals, whose
+                // compiler-appended trailing '\0' is not of type `char`
+                CHECK(json::parse(L"[1]") == json({1}));
+                CHECK(json::accept(L"[1]"));
+                CHECK(json::parse(u"[1]") == json({1}));
+                CHECK(json::accept(u"[1]"));
+                CHECK(json::parse(U"[1]") == json({1}));
+                CHECK(json::accept(U"[1]"));
+#if defined(__cpp_char8_t)
+                CHECK(json::parse(u8"[1]") == json({1}));
+                CHECK(json::accept(u8"[1]"));
+#endif
+
+                // a NUL byte inside such a literal, as opposed to the single
+                // compiler-appended trailing one, is still rejected
+                {
+                    json _; // NOLINT(readability-identifier-naming)
+                    CHECK_THROWS_WITH_AS(_ = json::parse(L"[1\0]"),
+                                         "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing array - invalid literal; last read: '1<U+0000>'; expected ']'",
+                                         json::parse_error&);
+                    CHECK_FALSE(json::accept(L"[1\0]"));
+                }
+            }
+#endif
         }
 
         SECTION("number")
@@ -1862,6 +1850,102 @@ TEST_CASE("parser class")
             }
         }
 
+        SECTION("no callback for the content of a discarded container (#5643)")
+        {
+            // discarding a container at its start event must also hide
+            // everything inside it from the callback: none of the nested
+            // keys, values, or nested containers' own start/end events may
+            // be reported
+            std::vector<std::string> log;
+            bool first = true;
+            const json j = json::parse(R"({"skip": {"k1": 1, "k2": [2, {"k3": 3}]}, "keep": 1})",
+                                       [&](int depth, json::parse_event_t event, json & parsed)
+            {
+                static const char* const names[] = {"object_start", "object_end", "array_start", "array_end", "key", "value"}; // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+                log.push_back(std::to_string(depth) + " " + names[static_cast<int>(event)] + " " + parsed.dump());
+
+                if (depth == 1 && event == json::parse_event_t::object_start && first)
+                {
+                    // discard "skip" right at its object_start event
+                    first = false;
+                    return false;
+                }
+                return true;
+            });
+
+            CHECK(log == std::vector<std::string>
+            {
+                "0 object_start <discarded>",
+                "1 key \"skip\"",
+                "1 object_start <discarded>",
+                "1 key \"keep\"",
+                "1 value 1",
+                "0 object_end {\"keep\":1}"
+            });
+            CHECK(j == json({{"keep", 1}}));
+        }
+
+        SECTION("callback still called inside a container whose key was rejected (#5643)")
+        {
+            // rejecting a key does not discard its value's container at the
+            // container's own start event, so the callback is still called
+            // for that container's content; only storing the container
+            // under the rejected key is skipped
+            // (documented for parser_callback_t: "the callback is still
+            // called for the associated value, but its return value has no
+            // further effect")
+            const auto record = [](std::vector<std::string>& log, int depth, json::parse_event_t event, const json & parsed)
+            {
+                static const char* const names[] = {"object_start", "object_end", "array_start", "array_end", "key", "value"}; // NOLINT(cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
+                log.push_back(std::to_string(depth) + " " + names[static_cast<int>(event)] + " " + parsed.dump());
+            };
+
+            std::vector<std::string> log_object;
+            const json j_object = json::parse(R"({"skip": {"k1": 1}, "keep": 2})",
+                                              [&](int depth, json::parse_event_t event, json & parsed)
+            {
+                record(log_object, depth, event, parsed);
+                return !(event == json::parse_event_t::key && parsed == json("skip"));
+            });
+
+            CHECK(log_object == std::vector<std::string>
+            {
+                "0 object_start <discarded>",
+                "1 key \"skip\"",
+                "1 object_start <discarded>",
+                "2 key \"k1\"",
+                "2 value 1",
+                "1 key \"keep\"",
+                "1 value 2",
+                "0 object_end {\"keep\":2}"
+            });
+            CHECK(j_object == json({{"keep", 2}}));
+
+            // same for a rejected key whose value is an array rather than an object
+            std::vector<std::string> log_array;
+            const json j_array = json::parse(R"({"skip": [1, {"k1": 2}], "keep": 2})",
+                                             [&](int depth, json::parse_event_t event, json & parsed)
+            {
+                record(log_array, depth, event, parsed);
+                return !(event == json::parse_event_t::key && parsed == json("skip"));
+            });
+
+            CHECK(log_array == std::vector<std::string>
+            {
+                "0 object_start <discarded>",
+                "1 key \"skip\"",
+                "1 array_start <discarded>",
+                "2 value 1",
+                "2 object_start <discarded>",
+                "3 key \"k1\"",
+                "3 value 2",
+                "1 key \"keep\"",
+                "1 value 2",
+                "0 object_end {\"keep\":2}"
+            });
+            CHECK(j_array == json({{"keep", 2}}));
+        }
+
         SECTION("special cases")
         {
             // the following test cases cover the situation in which an empty
@@ -1894,7 +1978,13 @@ TEST_CASE("parser class")
 
         SECTION("from std::array")
         {
-            std::array<uint8_t, 5> v { {'t', 'r', 'u', 'e'} };
+            // NOTE: this array is sized to exactly the length of "true" (unlike
+            // the trailing-NUL-tolerant default behavior elsewhere in this file,
+            // see the "NUL byte handling" section above); a size of 5 here would
+            // leave a value-initialized trailing 0x00 element that is only
+            // silently accepted as end-of-input by default and would fail under
+            // JSON_STRICT_NUL_HANDLING
+            std::array<uint8_t, 4> v { {'t', 'r', 'u', 'e'} };
             json j;
             json::parser(nlohmann::detail::input_adapter(std::begin(v), std::end(v))).parse(true, j);
             CHECK(j == json(true));
@@ -2035,7 +2125,69 @@ TEST_CASE("parser class")
     {
         json _;
         CHECK_THROWS_WITH_AS(_ = json::parse("/a", nullptr, true, true), "[json.exception.parse_error.101] parse error at line 1, column 2: syntax error while parsing value - invalid comment; expecting '/' or '*' after '/'; last read: '/a'", json::parse_error);
+        // "/*" is a string literal, so it carries a compiler-appended trailing
+        // '\0'; by default that NUL is read like any other byte and shows up
+        // in "last read", but JSON_STRICT_NUL_HANDLING trims exactly that one
+        // trailing byte from a char array (see
+        // docs/mkdocs/docs/api/macros/json_strict_nul_handling.md), so it no
+        // longer appears in the message in that state
+#if defined(JSON_TEST_STRICT_NUL_HANDLING_ENABLED)
+        CHECK_THROWS_WITH_AS(_ = json::parse("/*", nullptr, true, true), "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid comment; missing closing '*/'; last read: '/*'", json::parse_error);
+#else
         CHECK_THROWS_WITH_AS(_ = json::parse("/*", nullptr, true, true), "[json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing value - invalid comment; missing closing '*/'; last read: '/*<U+0000>'", json::parse_error);
+#endif
+    }
+
+    SECTION("comments before separators")
+    {
+        // The parser first checks for the expected ':' or ',' and only then
+        // falls back to the full token switch, which skips comments. A comment
+        // directly before a separator takes that fallback.
+        json _;
+
+        SECTION("ignored")
+        {
+            const std::vector<std::pair<std::string, json>> inputs =
+            {
+                {"{\"a\" /* c */ : 1}", {{"a", 1}}},
+                {"{\"a\" // c\n: 1}", {{"a", 1}}},
+                {R"({"a": 1, "b" /* c */ : 2})", {{"a", 1}, {"b", 2}}},
+                {R"({"a": 1 /* c */ , "b": 2})", {{"a", 1}, {"b", 2}}},
+                {"{\"a\": 1 // c\n, \"b\": 2}", {{"a", 1}, {"b", 2}}},
+                {"[1 /* c */ , 2]", {1, 2}},
+                {"[1 // c\n, 2]", {1, 2}},
+                {"{\"a\" /* c */ /* d */ : [1 // c\n , 2 /**/ ] /**/ , \"b\" : 3}", {{"a", {1, 2}}, {"b", 3}}}
+            };
+            for (const auto& input : inputs)
+            {
+                CAPTURE(input.first)
+                CHECK(json::parse(input.first, nullptr, true, true) == input.second);
+                CHECK(json::accept(input.first, true));
+            }
+        }
+
+        SECTION("ignored, with trailing commas")
+        {
+            CHECK(json::parse(std::string("[1 /* c */ , ]"), nullptr, true, true, true) == json({1}));
+            CHECK(json::parse(std::string("{\"a\": 1 /* c */ , }"), nullptr, true, true, true) == json({{"a", 1}}));
+            CHECK_THROWS_WITH_AS(_ = json::parse(std::string("[1 /* c */ , ]"), nullptr, true, true),
+                                 "[json.exception.parse_error.101] parse error at line 1, column 14: syntax error while parsing value - unexpected ']'; expected '[', '{', or a literal", json::parse_error);
+            CHECK_THROWS_WITH_AS(_ = json::parse(std::string("{\"a\": 1 /* c */ , }"), nullptr, true, true),
+                                 "[json.exception.parse_error.101] parse error at line 1, column 19: syntax error while parsing object key - unexpected '}'; expected string literal", json::parse_error);
+        }
+
+        SECTION("not ignored")
+        {
+            CHECK_THROWS_WITH_AS(_ = json::parse(std::string("{\"a\" /* c */ : 1}")),
+                                 "[json.exception.parse_error.101] parse error at line 1, column 6: syntax error while parsing object separator - invalid literal; last read: '\"a\" /'; expected ':'", json::parse_error);
+            CHECK_THROWS_WITH_AS(_ = json::parse(std::string("{\"a\": 1, \"b\" /* c */ : 2}")),
+                                 "[json.exception.parse_error.101] parse error at line 1, column 14: syntax error while parsing object separator - invalid literal; last read: '\"b\" /'; expected ':'", json::parse_error);
+            CHECK_THROWS_WITH_AS(_ = json::parse(std::string("{\"a\": 1 /* c */ , \"b\": 2}")),
+                                 "[json.exception.parse_error.101] parse error at line 1, column 9: syntax error while parsing object - invalid literal; last read: '1 /'; expected '}'", json::parse_error);
+            CHECK_THROWS_WITH_AS(_ = json::parse(std::string("[1 /* c */ , 2]")),
+                                 "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing array - invalid literal; last read: '1 /'; expected ']'", json::parse_error);
+            CHECK(!json::accept(std::string("[1 /* c */ , 2]")));
+        }
     }
 
 #if JSON_DIAGNOSTIC_POSITIONS
@@ -2261,86 +2413,6 @@ TEST_CASE("parser class")
 #endif
 }
 
-#if JSON_DIAGNOSTIC_POSITIONS
-
-TEST_CASE("diagnostic positions: value lifetime")
-{
-    SECTION("copy constructor copies positions, recursively")
-    {
-        const std::string s = R"({"a":1,"b":[1,2,3]})";
-        const json a = json::parse(s);
-        const json b = a; // NOLINT(performance-unnecessary-copy-initialization)
-
-        CHECK(b.start_pos() == a.start_pos());
-        CHECK(b.end_pos() == a.end_pos());
-        CHECK(b["b"].start_pos() == a["b"].start_pos());
-        CHECK(b["b"].end_pos() == a["b"].end_pos());
-    }
-
-    SECTION("move constructor resets the moved-from value to npos")
-    {
-        const std::string s = R"({"a":1,"b":[1,2,3]})";
-        json a = json::parse(s);
-        const auto a_start = a.start_pos();
-        const auto a_end = a.end_pos();
-
-        const json b(std::move(a));
-
-        CHECK(b.start_pos() == a_start);
-        CHECK(b.end_pos() == a_end);
-
-        CHECK(a.start_pos() == std::string::npos); // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-        CHECK(a.end_pos() == std::string::npos); // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-    }
-
-    SECTION("swap() exchanges positions along with the values")
-    {
-        // basic_json::swap() (and the friend swap() that forwards to it) used
-        // to swap only m_data.m_type/m_data.m_value, leaving
-        // start_position/end_position untouched -- unlike copy-assignment's
-        // operator=(basic_json), which swaps positions as part of its
-        // copy-and-swap implementation. After swap(a, b), each value ended up
-        // with the *other* value's content but its *own* original position.
-        // This is now fixed so that swap() is consistent with copy-assignment.
-        json a = json::parse(R"({"a":1})");
-        json b = json::parse(R"([1,2,3,4,5])");
-        const auto a_start = a.start_pos();
-        const auto a_end = a.end_pos();
-        const auto b_start = b.start_pos();
-        const auto b_end = b.end_pos();
-        // lengths (and thus end positions) differ, which is enough to tell
-        // after the swap whether positions actually moved with the values
-        CHECK(a_end != b_end);
-
-        using std::swap;
-        swap(a, b);
-
-        CHECK(a == json::parse(R"([1,2,3,4,5])"));
-        CHECK(b == json::parse(R"({"a":1})"));
-
-        CHECK(a.start_pos() == b_start);
-        CHECK(a.end_pos() == b_end);
-        CHECK(b.start_pos() == a_start);
-        CHECK(b.end_pos() == a_end);
-
-        // member swap() behaves the same as the free function
-        json c = json::parse(R"({"a":1})");
-        json d = json::parse(R"([1,2,3,4,5])");
-        const auto c_start = c.start_pos();
-        const auto c_end = c.end_pos();
-        const auto d_start = d.start_pos();
-        const auto d_end = d.end_pos();
-
-        c.swap(d);
-
-        CHECK(c.start_pos() == d_start);
-        CHECK(c.end_pos() == d_end);
-        CHECK(d.start_pos() == c_start);
-        CHECK(d.end_pos() == c_end);
-    }
-}
-#endif
-
 // this test relies on parse errors being thrown, so it is skipped when
 // exceptions are disabled (json::parse aborts instead of throwing there)
 #if !defined(JSON_NOEXCEPTION)
@@ -2401,7 +2473,7 @@ TEST_CASE("last-read diagnostics are identical across input adapters")
 
     for (const auto& s : inputs)
     {
-        CAPTURE(s);
+        CAPTURE(s)
 
         // reference: contiguous std::string -> seekable (lazy) path
         const std::string reference = parse_error_message(s);
@@ -2485,12 +2557,10 @@ TEST_CASE("diagnostic positions: value lifetime, input adapters, and SAX")
 
         SECTION("move constructor resets the moved-from value to npos")
         {
-            // basic_json(basic_json&&) (json.hpp, around line 1265) copies
+            // basic_json(basic_json&&) copies
             // other's start_position/end_position into *this and then resets
-            // other's to npos (see the cppcheck-suppress[accessForwarded]
-            // annotation there, which flags this reset as worth a second
-            // look). Only the top-level moved-from value is affected; its
-            // (moved-away) children are gone along with it.
+            // other's to npos. Only the top-level moved-from value is
+            // affected; its (moved-away) children are gone along with it.
             const std::string s = R"({"a":1,"b":[1,2,3]})";
             json a = json::parse(s);
             const auto a_start = a.start_pos();
@@ -2507,9 +2577,9 @@ TEST_CASE("diagnostic positions: value lifetime, input adapters, and SAX")
             CHECK(b["b"].end_pos() == nested_end);
 
             // the moved-from value is reset to a null and reports npos
-            CHECK(a.is_null()); // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-            CHECK(a.start_pos() == std::string::npos); // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
-            CHECK(a.end_pos() == std::string::npos); // NOLINT(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
+            CHECK(a.is_null()); // NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved,clang-analyzer-cplusplus.Move)
+            CHECK(a.start_pos() == std::string::npos); // NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved,clang-analyzer-cplusplus.Move)
+            CHECK(a.end_pos() == std::string::npos); // NOLINT(bugprone-use-after-move,hicpp-invalid-access-moved,clang-analyzer-cplusplus.Move)
         }
 
         SECTION("swap() exchanges positions along with values")
@@ -2546,6 +2616,21 @@ TEST_CASE("diagnostic positions: value lifetime, input adapters, and SAX")
             CHECK(a.end_pos() == b_end);
             CHECK(b.start_pos() == a_start);
             CHECK(b.end_pos() == a_end);
+
+            // member swap() behaves the same as the free function
+            json c = json::parse(R"({"a":1})");
+            json d = json::parse(R"([1,2,3,4,5])");
+            const auto c_start = c.start_pos();
+            const auto c_end = c.end_pos();
+            const auto d_start = d.start_pos();
+            const auto d_end = d.end_pos();
+
+            c.swap(d);
+
+            CHECK(c.start_pos() == d_start);
+            CHECK(c.end_pos() == d_end);
+            CHECK(d.start_pos() == c_start);
+            CHECK(d.end_pos() == c_end);
         }
 
         SECTION("mutating a parsed document leaves positions of unrelated values untouched")
@@ -2706,7 +2791,7 @@ TEST_CASE("diagnostic positions: value lifetime, input adapters, and SAX")
 
         SECTION("binary formats have no text positions")
         {
-            // binary formats (CBOR, MessagePack, UBJSON, BSON, BJData) are
+            // binary formats (BJData, BON8, BSON, CBOR, MessagePack, UBJSON) are
             // parsed via detail::binary_reader, which never sets
             // start_position/end_position on the values it produces (they
             // have no notion of a text offset), so every value's position
@@ -2722,6 +2807,10 @@ TEST_CASE("diagnostic positions: value lifetime, input adapters, and SAX")
             const json from_msgpack = json::from_msgpack(json::to_msgpack(src));
             CHECK(from_msgpack.start_pos() == std::string::npos);
             CHECK(from_msgpack.end_pos() == std::string::npos);
+
+            const json from_bon8 = json::from_bon8(json::to_bon8(src));
+            CHECK(from_bon8.start_pos() == std::string::npos);
+            CHECK(from_bon8.end_pos() == std::string::npos);
 
             const json from_ubjson = json::from_ubjson(json::to_ubjson(src));
             CHECK(from_ubjson.start_pos() == std::string::npos);

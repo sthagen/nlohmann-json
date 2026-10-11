@@ -7,7 +7,8 @@ enum class input_format_t {
     msgpack,
     ubjson,
     bson,
-    bjdata
+    bjdata,
+    bon8
 };
 ```
 
@@ -31,6 +32,9 @@ bson
 bjdata
 :   BJData (Binary JData)
 
+bon8
+:   BON8 (Binary Object Notation 8)
+
 ## Examples
 
 ??? example
@@ -46,6 +50,11 @@ bjdata
     ```json
     --8<-- "examples/sax_parse__binary.output"
     ```
+
+## See also
+
+- [sax_parse](sax_parse.md) generic SAX parse interface, taking an `input_format_t` to select the input format
+- [cbor_tag_handler_t](cbor_tag_handler_t.md) configures how CBOR tags are treated while parsing
 
 ## Version history
 

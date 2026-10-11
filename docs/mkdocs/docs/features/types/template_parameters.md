@@ -8,6 +8,10 @@ these requirements so they do not have to be discovered by trial and error. Each
 that are known to work for that parameter and the ones that do not, checked against Boost 1.83, Abseil 20250127.0,
 Folly, EASTL 3.21, `ankerl::unordered_dense`, `phmap`, `gtl`, `robin_hood`, `tsl::ordered_map`, and Qt 6.
 
+To change a single template parameter and keep the others, use the member alias templates
+[`with_*_t`](../../api/basic_json/with_t.md); for instance, `nlohmann::json::with_float_t<long double>` is `json` with
+`#!cpp long double` as [`number_float_t`](../../api/basic_json/number_float_t.md).
+
 ## How to read this page
 
 Requirements are split into two groups:
@@ -26,8 +30,9 @@ Requirements are split into two groups:
     diagnosed with dedicated error messages, and violating most of them results in a compiler error somewhere inside
     the library. Four violations are not caught at compile time at all:
 
-    - A [`StringType`](#stringtype) whose `data()` is not null-terminated compiles and silently misparses numbers,
-      because the lexer hands the buffer to `#!cpp std::strtoull`/`#!cpp std::strtoll`/`#!cpp std::strtod`.
+    - A [`StringType`](#stringtype) whose `data()` is not null-terminated compiles and can silently misparse
+      floating-point numbers, because the lexer may hand the buffer to `#!cpp std::strtod`, which reads up to the
+      terminating null character.
     - A stateful [`AllocatorType`](#allocatortype) compiles and silently ignores its state: allocation, deallocation,
       and [`get_allocator()`](../../api/basic_json/get_allocator.md) each use a different default-constructed instance.
     - The two [cross-specialization conversions](#cross-specialization-conversions) below. These abort on an assertion
@@ -142,7 +147,7 @@ struct unordered_map_object
     using base_t::base_t;
 };
 
-using unordered_json = nlohmann::basic_json<unordered_map_object>;
+using unordered_json = nlohmann::json::with_object_t<unordered_map_object>;
 ```
 
 Whether `#!cpp std::unordered_map` can be instantiated at all depends on the standard library: `object_t` is formed
@@ -175,7 +180,7 @@ struct flat_hash_object
     using base_t::base_t;
 };
 
-using flat_hash_json = nlohmann::basic_json<flat_hash_object>;
+using flat_hash_json = nlohmann::json::with_object_t<flat_hash_object>;
 ```
 
 `absl::node_hash_map` keeps references to the mapped values valid across insertions; `absl::flat_hash_map` does not,
@@ -213,7 +218,7 @@ The library does not sort or de-duplicate keys itself; the behavior described in
     --8<-- "examples/custom_object_type.hpp"
     ```
 
-??? example "Compiling and using it"
+??? example "Example: use the custom `ObjectType`"
 
     ```cpp
     --8<-- "examples/custom_object_type.cpp"
@@ -306,7 +311,7 @@ using array_t = ArrayType<basic_json, AllocatorType<basic_json>>;
     --8<-- "examples/custom_array_type.hpp"
     ```
 
-??? example "Compiling and using it"
+??? example "Example: use the custom `ArrayType`"
 
     ```cpp
     --8<-- "examples/custom_array_type.cpp"
@@ -348,16 +353,16 @@ using array_t = ArrayType<basic_json, AllocatorType<basic_json>>;
 ### Always required
 
 - A member type `value_type` that is one byte wide and `char`-compatible. The library stores and processes UTF-8
-  encoded `char` data and hands `data()` to `#!cpp std::strtoull`/`#!cpp std::strtoll`.
+  encoded `char` data and passes `data()` to functions that take a `#!cpp const char*`, such as `#!cpp std::strtod`.
   `#!cpp std::wstring`, `#!cpp std::u16string`, and `#!cpp std::u32string` are **not** valid choices; see the FAQ on
   [wide string handling](../../home/faq.md#wide-string-handling).
 - Constructors: default, copy, move, from `#!cpp const char*` (which must not be `#!cpp explicit`), from
   `#!cpp (const char*, size_type)`, and from `#!cpp (size_type, char)`; and copy or move assignment.
 - Member functions `size()`, `clear()`, `resize(n, c)`, `data()`, `push_back(char)`, and `operator[]`
   (const and non-const, returning references). `c_str()` and `back()` are **not** required.
-- `data()` must return a pointer to a contiguous, **null-terminated** buffer -- the parser hands it to
-  `#!cpp std::strtoull`. A type whose `data()` is not null-terminated does not fail to compile; it silently
-  misparses numbers.
+- `data()` must return a pointer to a contiguous, **null-terminated** buffer -- the parser may hand it to
+  `#!cpp std::strtod`, which reads up to the null character. A type whose `data()` is not null-terminated does not
+  fail to compile; it can silently misparse floating-point numbers.
 - `append(const char*, size_type)`, used by [`dump`](../../api/basic_json/dump.md), and `append(const StringType&)`,
   used by the CBOR reader for indefinite-length strings. The library's internal string concatenation additionally has
   to append a `#!cpp char` and a `#!cpp const char*`; for each it selects between `append(arg)`, `#!cpp operator+=`,
@@ -389,10 +394,12 @@ using array_t = ArrayType<basic_json, AllocatorType<basic_json>>;
 | Functionality                                                                                                                     | Additional requirement                                                                                                                                                                       |
 |-----------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [`diff`](../../api/basic_json/diff.md), [`items`](../../api/basic_json/items.md), [`std::hash`](../../api/basic_json/std_hash.md) | conversion of a `#!cpp std::size_t` to `StringType`: either assignability from the result of `#!cpp std::to_string`, or an ADL overload `#!cpp void int_to_string(StringType&, std::size_t)` |
+| [`operator/(std::size_t)`](../../api/json_pointer/operator_slash.md)                                                              | the same conversion of a `#!cpp std::size_t` to `StringType` as `diff`, `items`, and `std::hash` above                                                                                       |
 | [`std::hash<basic_json>`](../../api/basic_json/std_hash.md)                                                                       | additionally a specialization of `#!cpp std::hash<StringType>`                                                                                                                               |
 | [`to_bson`](../../api/basic_json/to_bson.md)                                                                                      | `find(value_type)` and `npos`                                                                                                                                                                |
 | [`parse`](../../api/basic_json/parse.md) from a `string_t`                                                                        | the input adapters must accept it; otherwise pass a character range                                                                                                                          |
 | `#!cpp operator<<(std::ostream&, const json_pointer&)`                                                                            | streamability to `#!cpp std::ostream`                                                                                                                                                        |
+| [`to_string`](../../api/basic_json/to_string.md)                                                                                  | conversion of `StringType` to `#!cpp std::string` (the function returns a `#!cpp std::string`)                                                                                               |
 | exception messages                                                                                                                | `data()` and `size()`, or `begin()` and `end()`                                                                                                                                              |
 
 ### Compatible types
@@ -447,7 +454,7 @@ using array_t = ArrayType<basic_json, AllocatorType<basic_json>>;
     --8<-- "examples/custom_string_type.hpp"
     ```
 
-??? example "Compiling and using it"
+??? example "Example: use the custom `StringType`"
 
     ```cpp
     --8<-- "examples/custom_string_type.cpp"
@@ -534,8 +541,9 @@ therefore silently changes parse results rather than raising an error. See
 
 `NumberFloatType` must be one of `#!cpp float`, `#!cpp double`, or `#!cpp long double`:
 
-- The [parser](../parsing/index.md) converts number literals with `#!cpp std::strtof`, `#!cpp std::strtod`, or
-  `#!cpp std::strtold`; the library provides overloads for exactly these three types.
+- The [parser](../parsing/index.md) converts number literals with `#!cpp std::from_chars` or, as a fallback, with
+  `#!cpp std::strtof`, `#!cpp std::strtod`, or `#!cpp std::strtold`; the library provides overloads for exactly these
+  three types.
 - [`dump`](../../api/basic_json/dump.md) falls back to `#!cpp std::snprintf` with the `%g` and `%Lg` conversion
   specifiers, for which the library likewise provides only `#!cpp double` and `#!cpp long double` overloads
   (`#!cpp float` is promoted to `#!cpp double`).
@@ -547,7 +555,7 @@ Grisu2 algorithm, which produces the shortest representation that round-trips. O
 ### Required for the binary formats
 
 `NumberFloatType` must be `#!cpp float` or `#!cpp double`. The writers for
-[CBOR, MessagePack, UBJSON, BJData, and BSON](../binary_formats/index.md) map a floating-point value onto an IEEE 754
+[CBOR, MessagePack, UBJSON, BJData, BON8, and BSON](../binary_formats/index.md) map a floating-point value onto an IEEE 754
 binary32 or binary64 field and have no encoding for `#!cpp long double`.
 
 ### Compatible types
@@ -562,7 +570,11 @@ binary32 or binary64 field and have no encoding for `#!cpp long double`.
 ## `AllocatorType`
 
 `AllocatorType` is instantiated with **one** argument, for each of `object_t`, `array_t`, `string_t`, `binary_t`,
-`basic_json`, and `#!cpp std::pair<const StringType, basic_json>`.
+`basic_json`, `#!cpp std::pair<const StringType, basic_json>`, and `#!cpp std::pair<StringType, basic_json>`.
+
+`AllocatorType` is not the only allocator a `basic_json` uses. It allocates the JSON values themselves, but most
+temporary storage is allocated with `#!cpp std::allocator`. This includes the parser's stacks and the stacks that
+process deeply nested values without recursion.
 
 ### Always required
 
@@ -664,7 +676,7 @@ such a container to a `basic_json` value.
     --8<-- "examples/custom_binary_type.hpp"
     ```
 
-??? example "Compiling and using it"
+??? example "Example: use the custom `BinaryType`"
 
     ```cpp
     --8<-- "examples/custom_binary_type.cpp"

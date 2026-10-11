@@ -109,6 +109,9 @@ The class satisfies the following concept requirements:
 - **initializer_list_t** - type for initializer lists of `basic_json` values
 - [**input_format_t**](input_format_t.md) - type to choose the format to parse
 - [**json_sax_t**](../json_sax/index.md) - type for SAX events
+- [**with_object_t, with_array_t, with_string_t, with_boolean_t, with_integers_t, with_float_t, with_allocator_t,
+  with_json_serializer_t, with_binary_t, with_base_class_t**](with_t.md) - types to create a `basic_json` type with
+  one (or two) replaced template parameters
 
 ### Exceptions
 
@@ -200,6 +203,7 @@ Direct access to the stored value of a JSON value.
 - [**get_ref**](get_ref.md) - get a reference value
 - [**operator ValueType**](operator_ValueType.md) - get a value
 - [**get_binary**](get_binary.md) - get a binary value
+- [**as_base_class**](as_base_class.md) - access the custom base class
 
 ### Element access
 
@@ -290,11 +294,13 @@ Access to the JSON value
 ### Binary formats
 
 - [**from_bjdata**](from_bjdata.md) (_static_) - create a JSON value from an input in BJData format
+- [**from_bon8**](from_bon8.md) (_static_) - create a JSON value from an input in BON8 format
 - [**from_bson**](from_bson.md) (_static_) - create a JSON value from an input in BSON format
 - [**from_cbor**](from_cbor.md) (_static_) - create a JSON value from an input in CBOR format
 - [**from_msgpack**](from_msgpack.md) (_static_) - create a JSON value from an input in MessagePack format
 - [**from_ubjson**](from_ubjson.md) (_static_) - create a JSON value from an input in UBJSON format
 - [**to_bjdata**](to_bjdata.md) (_static_) - create a BJData serialization of a given JSON value
+- [**to_bon8**](to_bon8.md) (_static_) - create a BON8 serialization of a given JSON value
 - [**to_bson**](to_bson.md) (_static_) - create a BSON serialization of a given JSON value
 - [**to_cbor**](to_cbor.md) (_static_) - create a CBOR serialization of a given JSON value
 - [**to_msgpack**](to_msgpack.md) (_static_) - create a MessagePack serialization of a given JSON value

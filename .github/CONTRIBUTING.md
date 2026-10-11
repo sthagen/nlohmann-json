@@ -98,7 +98,7 @@ $ ctest --test-dir build -j 10
 The test suite should report:
 
 ```
-100% tests passed, 0 tests failed out of 98
+100% tests passed, 0 tests failed out of <number of tests>
 ```
 
 #### Add tests
@@ -142,11 +142,24 @@ The documentation will then be available at <http://127.0.0.1:8000/>. See the do
 [mkdocs](https://www.mkdocs.org) and [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) for more
 information.
 
+Before opening a pull request, check the documentation like the CI does:
+
+```shell
+make build -C docs/mkdocs          # strict build: fails on broken links, anchors, and structure problems
+make check_mermaid -C docs/mkdocs  # checks the Mermaid diagrams (requires Node.js)
+```
+
+The search index of the docset is generated from [`mkdocs.yml`](https://github.com/nlohmann/json/blob/develop/docs/mkdocs/mkdocs.yml)
+and each page's title (H1) and declaration by
+[`docs/docset/generate_docset.py`](https://github.com/nlohmann/json/blob/develop/docs/docset/generate_docset.py);
+`make build` reports API pages that cannot be classified.
+
 ### Amalgamate the source code
 
 The single-header files
-[`single_include/nlohmann/json.hpp`](https://github.com/nlohmann/json/blob/develop/single_include/nlohmann/json.hpp) and
-[`single_include/nlohmann/json_fwd.hpp`](https://github.com/nlohmann/json/blob/develop/single_include/nlohmann/json_fwd.hpp)
+[`single_include/nlohmann/json.hpp`](https://github.com/nlohmann/json/blob/develop/single_include/nlohmann/json.hpp),
+[`single_include/nlohmann/json_fwd.hpp`](https://github.com/nlohmann/json/blob/develop/single_include/nlohmann/json_fwd.hpp), and
+[`single_include/nlohmann/json_literals.hpp`](https://github.com/nlohmann/json/blob/develop/single_include/nlohmann/json_literals.hpp)
 are **generated** from the source files in the
 [`include/nlohmann` directory](https://github.com/nlohmann/json/tree/develop/include/nlohmann). **Do not** edit the
 files directly; instead, modify the include/nlohmann sources and regenerate the files by executing:
@@ -158,9 +171,18 @@ make amalgamate
 Running `make amalgamate` will also apply automatic formatting to the source files using
 [`Artistic Style`](https://astyle.sourceforge.net/). This formatting may modify your source files in-place. Be certain to review and commit any changes to avoid unintended formatting diffs in commits.
 
+If you add, rename, or remove a header in `include/nlohmann`, also regenerate the header list in
+[`BUILD.bazel`](https://github.com/nlohmann/json/blob/develop/BUILD.bazel) (requires CMake) by executing:
+
+```shell
+make BUILD.bazel
+```
+
+The amalgamation check in CI fails if any of these generated files is out of date.
+
 ## Recommended documentation
 
-- The library’s [README file](https://github.com/nlohmann/json/blob/master/README.md) is an excellent starting point to
+- The library’s [README file](https://github.com/nlohmann/json/blob/develop/README.md) is an excellent starting point to
   understand its functionality.
 - The [documentation page](https://json.nlohmann.me) is the reference documentation of the library.
 - [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259) is the reference for the JavaScript Object Notation (JSON)
@@ -186,6 +208,9 @@ API of the 3.x.y version is broken. This includes:
 - Changing access specifiers.
 - Changing default arguments.
 
+What is and is not covered by this guarantee is described in the
+[roadmap](https://json.nlohmann.me/community/roadmap/#api-stability).
+
 Although these guidelines may seem restrictive, they are essential for maintaining the library’s utility.
 
 Breaking changes may be introduced when they are guarded with a feature macro such as
@@ -196,9 +221,9 @@ feature macros then allows users to test their code against the library in the n
 ### Break C++11 language conformance
 
 This library is designed to work with C++11 and later. This means that any
-[supported C++11 compiler](https://github.com/nlohmann/json/blob/master/README.md#supported-compilers) should compile
+[supported C++11 compiler](https://github.com/nlohmann/json/blob/develop/README.md#supported-compilers) should compile
 the library without problems. Some compilers like GCC 4.7 (and earlier), Clang 3.3 (and earlier), or Microsoft Visual
-Studio 13.0 and earlier are known not to work due to missing or incomplete C++11 support.
+C++ 2013 and earlier are known not to work due to missing or incomplete C++11 support.
 
 Please do not add features that do not work with the mentioned supported compilers. Please guard features from C++14 and
 later against the respective [`JSON_HAS_CPP_14`](https://json.nlohmann.me/api/macros/json_has_cpp_11/) macros.
@@ -214,12 +239,11 @@ extension.
 The following areas really need contribution and are always welcomed:
 
 - Extending the **continuous integration** toward more exotic compilers such as Android NDK, Intel's Compiler, or the
-  bleeding-edge versions Clang.
-- Improving the efficiency of the **JSON parser**. The current parser is implemented as a naive recursive descent parser
-  with hand-coded string handling. More sophisticated approaches like LALR parsers would be really appreciated. That
-  said, parser generators like Bison or ANTLR do not play nice with single-header files -- I really would like to keep
-  the parser inside the `json.hpp` header, and I am not aware of approaches similar to [`re2c`](http://re2c.org) for
-  parsing.
+  bleeding-edge versions of Clang.
+- Improving the efficiency of the **JSON parser**. The current parser is a hand-written iterative parser that keeps an
+  explicit stack instead of recursing, with hand-coded string handling. Speeding up the lexer or the value construction
+  would be appreciated. Parser generators like Bison or ANTLR do not play nice with single-header files -- I really
+  would like to keep the parser inside the `json.hpp` header.
 - Extending and updating existing **benchmarks** to include (the most recent version of) this library. Though efficiency
   is not everything, speed and memory consumption are very important characteristics for C++ developers, so having
   proper comparisons would be interesting.

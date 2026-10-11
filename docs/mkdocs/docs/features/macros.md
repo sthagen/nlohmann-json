@@ -23,6 +23,17 @@ This macro overrides [`#!cpp catch`](https://en.cppreference.com/w/cpp/language/
 
 See [full documentation of `JSON_CATCH_USER(exception)`](../api/macros/json_throw_user.md).
 
+## `JSON_DELETE_DEPRECATED_FUNCTIONS`
+
+When defined to `1`, all deprecated functions are declared as deleted instead of only being marked as deprecated, so
+code that still calls them no longer compiles. This way, you can find all calls that need to be replaced before version
+4.0.0 removes these functions.
+
+The macro can also be set with the CMake option
+[`JSON_DeleteDeprecatedFunctions`](../integration/cmake.md#json_deletedeprecatedfunctions) (`OFF` by default).
+
+See [full documentation of `JSON_DELETE_DEPRECATED_FUNCTIONS`](../api/macros/json_delete_deprecated_functions.md).
+
 ## `JSON_DIAGNOSTICS`
 
 This macro enables extended diagnostics for exception messages. Possible values are `1` to enable or `0` to disable
@@ -71,6 +82,45 @@ To override the built-in check, define `JSON_HAS_FILESYSTEM` or `JSON_HAS_EXPERI
 
 See [full documentation of `JSON_HAS_FILESYSTEM` and `JSON_HAS_EXPERIMENTAL_FILESYSTEM`](../api/macros/json_has_filesystem.md).
 
+## `JSON_HAS_RANGES`
+
+The library uses `std::ranges` (and concepts) where available, for example, to parse from C++20 ranges and to
+construct JSON arrays from range views. The library detects whether the standard library supports ranges and
+disables the support on toolchains with an incomplete implementation. To override the built-in check, define
+`JSON_HAS_RANGES` to `1` or `0`.
+
+See [full documentation of `JSON_HAS_RANGES`](../api/macros/json_has_ranges.md).
+
+## `JSON_HAS_RANGE_VIEW_CONVERSION`
+
+When `JSON_HAS_RANGES` is enabled (and the compiler is not MinGW), a JSON array can be constructed directly from a C++20
+range view such as `std::views::filter(...)`. To override the built-in check, define `JSON_HAS_RANGE_VIEW_CONVERSION` to
+`1` or `0`.
+
+See [full documentation of `JSON_HAS_RANGE_VIEW_CONVERSION`](../api/macros/json_has_range_view_conversion.md).
+
+## `JSON_HAS_STATIC_RTTI`
+
+The library detects whether the compiler supports run time type information (RTTI), which it needs, for instance, to
+exclude `std::any` from the candidate types of the implicit conversion on C++17. To override the built-in check, define
+`JSON_HAS_STATIC_RTTI` to `1` or `0`.
+
+See [full documentation of `JSON_HAS_STATIC_RTTI`](../api/macros/json_has_static_rtti.md).
+
+## `JSON_HAS_STD_FORMAT`
+
+When compiling with C++20 and a standard library that provides `<format>`, the library provides a `std::formatter`
+specialization for JSON values. To override the built-in check, define `JSON_HAS_STD_FORMAT` to `1` or `0`.
+
+See [full documentation of `JSON_HAS_STD_FORMAT`](../api/macros/json_has_std_format.md).
+
+## `JSON_HAS_THREE_WAY_COMPARISON`
+
+When the compiler and standard library support 3-way comparison (the spaceship operator `<=>`), the library provides it
+for JSON values. To override the built-in check, define `JSON_HAS_THREE_WAY_COMPARISON` to `1` or `0`.
+
+See [full documentation of `JSON_HAS_THREE_WAY_COMPARISON`](../api/macros/json_has_three_way_comparison.md).
+
 ## `JSON_NOEXCEPTION`
 
 Exceptions can be switched off by defining the symbol `JSON_NOEXCEPTION`.
@@ -83,6 +133,23 @@ When defined, default parse and serialize functions for enums are excluded and h
 
 See [full documentation of `JSON_DISABLE_ENUM_SERIALIZATION`](../api/macros/json_disable_enum_serialization.md).
 
+## `JSON_DISABLE_TUPLE_REFERENCE_CONVERSION`
+
+When defined to `1`, a JSON value can no longer be created from a one-element `std::tuple` holding a reference to a JSON
+value, such as the result of `std::forward_as_tuple(j)`. This lets `std::tuple` convert such tuples element-wise. This
+is planned to become the default in version 4.0.0.
+
+See [full documentation of `JSON_DISABLE_TUPLE_REFERENCE_CONVERSION`](../api/macros/json_disable_tuple_reference_conversion.md).
+
+## `JSON_NO_AUTOMATIC_UDLS`
+
+When defined, `<nlohmann/json.hpp>` does not include `<nlohmann/json_literals.hpp>` with the user-defined string literals
+`operator""_json` and `operator""_json_pointer`. This reduces the compile time of translation units that do not use
+them, because the literals instantiate the parser in every translation unit that includes them. Include
+`<nlohmann/json_literals.hpp>` where the literals are needed.
+
+See [full documentation of `JSON_NO_AUTOMATIC_UDLS`](../api/macros/json_no_automatic_udls.md).
+
 ## `JSON_NO_IO`
 
 When defined, headers `<cstdio>`, `<ios>`, `<iosfwd>`, `<istream>`, and `<ostream>` are not included and parse functions
@@ -90,6 +157,23 @@ relying on these headers are excluded. This is relevant for environment where th
 security reasons (e.g., Intel Software Guard Extensions (SGX)).
 
 See [full documentation of `JSON_NO_IO`](../api/macros/json_no_io.md).
+
+## `JSON_NO_THREAD_LOCAL`
+
+When defined, the library does not use `#!cpp thread_local` storage. Copying a value and comparing two values then
+always avoid the call stack rather than descending into a bounded number of levels first, which is slower but yields the
+same values and the same comparisons.
+
+See [full documentation of `JSON_NO_THREAD_LOCAL`](../api/macros/json_no_thread_local.md).
+
+## `JSON_PRECISE_STREAM_POSITION`
+
+When defined to `1`, [`operator>>`](../api/operator_gtgt.md) and non-strict
+[`sax_parse`](../api/basic_json/sax_parse.md) leave an input stream positioned right after the parsed value, instead of
+also consuming the character that terminates a number. The default value is `0`, which preserves the existing behavior;
+this is planned to become the default in version 4.0.0.
+
+See [full documentation of `JSON_PRECISE_STREAM_POSITION`](../api/macros/json_precise_stream_position.md).
 
 ## `JSON_SKIP_LIBRARY_VERSION_CHECK`
 
@@ -104,6 +188,33 @@ When defined, the library will not create a compile error when a known unsupport
 using the library with compilers that do not fully support C++11 and may only work if unsupported features are not used.
 
 See [full documentation of `JSON_SKIP_UNSUPPORTED_COMPILER_CHECK`](../api/macros/json_skip_unsupported_compiler_check.md).
+
+## `JSON_STRICT_BINARY_UTF8`
+
+When defined to `1`, [`to_cbor`](../api/basic_json/to_cbor.md), [`to_ubjson`](../api/basic_json/to_ubjson.md),
+[`to_bjdata`](../api/basic_json/to_bjdata.md), and [`to_bson`](../api/basic_json/to_bson.md) throw
+[`type_error.316`](../home/exceptions.md#jsonexceptiontype_error316) for a string value or object key that is not
+valid UTF-8. The default value is `0`, which writes the bytes unchanged as before version 3.13.0; this is planned to
+become the default in version 4.0.0.
+
+The check can also be enabled with the CMake option
+[`JSON_StrictBinaryUTF8`](../integration/cmake.md#json_strictbinaryutf8) (`OFF` by default) which sets
+`JSON_STRICT_BINARY_UTF8` accordingly.
+
+See [full documentation of `JSON_STRICT_BINARY_UTF8`](../api/macros/json_strict_binary_utf8.md).
+
+## `JSON_STRICT_NUL_HANDLING`
+
+When defined to `1`, a `'\0'` (NUL) byte anywhere in the input is rejected with `parse_error.101`, like any other
+unexpected byte, instead of being silently treated as end of input (see the
+[FAQ entry](../home/faq.md#nul-bytes-in-the-input) for background). The default value is `0`, which preserves the
+existing behavior; this is planned to become the default in version 4.0.0.
+
+The strict handling can also be enabled with the CMake option
+[`JSON_StrictNulHandling`](../integration/cmake.md#json_strictnulhandling) (`OFF` by default) which sets
+`JSON_STRICT_NUL_HANDLING` accordingly.
+
+See [full documentation of `JSON_STRICT_NUL_HANDLING`](../api/macros/json_strict_nul_handling.md).
 
 ## `JSON_THROW_USER(exception)`
 
@@ -133,9 +244,17 @@ See [full documentation of `JSON_USE_GLOBAL_UDLS`](../api/macros/json_use_global
 ## `JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON`
 
 When defined to `1`, the library restores the legacy behavior in which a discarded value compared equal to itself. This
-behavior is deprecated and switched off (`0`) by default.
+behavior is [deprecated](../integration/migration_guide.md#miscellaneous-functions) and switched off (`0`) by
+default.
 
 See [full documentation of `JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON`](../api/macros/json_use_legacy_discarded_value_comparison.md).
+
+## `JSON_USE_OBJECTS_FOR_ENUM_KEYED_MAPS`
+
+When defined to `1`, maps with enum keys (e.g., `std::map<E, T>`) are stored as objects, using the enum's conversion for
+the keys, instead of arrays of `[key, value]` pairs. It is switched off (`0`) by default.
+
+See [full documentation of `JSON_USE_OBJECTS_FOR_ENUM_KEYED_MAPS`](../api/macros/json_use_objects_for_enum_keyed_maps.md).
 
 ## `JSON_USE_SIMDUTF`
 

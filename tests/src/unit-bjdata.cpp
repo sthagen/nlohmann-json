@@ -9,8 +9,17 @@
 #include "doctest_compatibility.h"
 
 #define JSON_TESTS_PRIVATE
+// capture whether JSON_DELETE_DEPRECATED_FUNCTIONS was enabled on the command
+// line *before* including json.hpp, since the library #undefs it once the header
+// has been fully processed (see include/nlohmann/detail/macro_unscope.hpp); the
+// tests of deprecated functions are skipped if these functions are deleted
+#if defined(JSON_DELETE_DEPRECATED_FUNCTIONS) && (JSON_DELETE_DEPRECATED_FUNCTIONS == 1)
+    #define JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+#endif
+
 #include <nlohmann/json.hpp>
 using nlohmann::json;
+using ordered_json = nlohmann::ordered_json;
 
 #include <algorithm>
 #include <climits>
@@ -19,159 +28,15 @@ using nlohmann::json;
 #include <fstream>
 #include <set>
 #include "make_test_data_available.hpp"
+#include "round_trip_corpus.hpp"
 #include "test_utils.hpp"
+#include "sax_countdown.hpp"
+using utils::SaxCountdown;
 
-namespace
-{
-class SaxCountdown
-{
-  public:
-    explicit SaxCountdown(const int count) : events_left(count)
-    {}
 
-    bool null()
-    {
-        return events_left-- > 0;
-    }
-
-    bool boolean(bool /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_integer(json::number_integer_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_unsigned(json::number_unsigned_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool number_float(json::number_float_t /*unused*/, const std::string& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool string(std::string& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool binary(std::vector<std::uint8_t>& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool start_object(std::size_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool key(std::string& /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool end_object()
-    {
-        return events_left-- > 0;
-    }
-
-    bool start_array(std::size_t /*unused*/)
-    {
-        return events_left-- > 0;
-    }
-
-    bool end_array()
-    {
-        return events_left-- > 0;
-    }
-
-    bool parse_error(std::size_t /*unused*/, const std::string& /*unused*/, const json::exception& /*unused*/) // NOLINT(readability-convert-member-functions-to-static)
-    {
-        return false;
-    }
-
-  private:
-    int events_left = 0;
-};
-} // namespace
-
-// at some point in the future, a unit test dedicated to type traits might be a good idea
-template <typename OfType, typename T, bool MinInRange, bool MaxInRange>
-struct trait_test_arg
-{
-    using of_type = OfType;
-    using type = T;
-    static constexpr bool min_in_range = MinInRange;
-    static constexpr bool max_in_range = MaxInRange;
-};
-
-TEST_CASE_TEMPLATE_DEFINE("value_in_range_of trait", T, value_in_range_of_test) // NOLINT(readability-math-missing-parentheses)
-{
-    using nlohmann::detail::value_in_range_of;
-
-    using of_type = typename T::of_type;
-    using type = typename T::type;
-    constexpr bool min_in_range = T::min_in_range;
-    constexpr bool max_in_range = T::max_in_range;
-
-    type const val_min = std::numeric_limits<type>::min();
-    type const val_min2 = val_min + 1;
-    type const val_max = std::numeric_limits<type>::max();
-    type const val_max2 = val_max - 1;
-
-    REQUIRE(CHAR_BIT == 8);
-
-    std::string of_type_str;
-    if (std::is_unsigned<of_type>::value)
-    {
-        of_type_str += "u";
-    }
-    of_type_str += "int";
-    of_type_str += std::to_string(sizeof(of_type) * 8);
-
-    INFO("of_type := ", of_type_str);
-
-    std::string type_str;
-    if (std::is_unsigned<type>::value)
-    {
-        type_str += "u";
-    }
-    type_str += "int";
-    type_str += std::to_string(sizeof(type) * 8);
-
-    INFO("type := ", type_str);
-
-    CAPTURE(val_min);
-    CAPTURE(min_in_range);
-    CAPTURE(val_max);
-    CAPTURE(max_in_range);
-
-    if (min_in_range)
-    {
-        CHECK(value_in_range_of<of_type>(val_min));
-        CHECK(value_in_range_of<of_type>(val_min2));
-    }
-    else
-    {
-        CHECK_FALSE(value_in_range_of<of_type>(val_min));
-        CHECK_FALSE(value_in_range_of<of_type>(val_min2));
-    }
-
-    if (max_in_range)
-    {
-        CHECK(value_in_range_of<of_type>(val_max));
-        CHECK(value_in_range_of<of_type>(val_max2));
-    }
-    else
-    {
-        CHECK_FALSE(value_in_range_of<of_type>(val_max));
-        CHECK_FALSE(value_in_range_of<of_type>(val_max2));
-    }
-}
+// trait_test_arg and the "value_in_range_of trait" TEST_CASE_TEMPLATE_DEFINE
+// are shared with unit-32bit.cpp
+#include "value_in_range_of_test.hpp"
 
 // NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 TEST_CASE_TEMPLATE_INVOKE(value_in_range_of_test, \
@@ -209,25 +74,100 @@ TEST_CASE_TEMPLATE_INVOKE(value_in_range_of_test, \
 
 TEST_CASE("BJData")
 {
-    SECTION("binary_reader BJData LUT arrays are sorted")
+    SECTION("binary_reader BJData lookup tables")
     {
+        // both lookups are static member functions
         std::vector<std::uint8_t> const data;
-        auto ia = nlohmann::detail::input_adapter(data);
-        // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-        nlohmann::detail::binary_reader<json, decltype(ia)> const br{std::move(ia), json::input_format_t::bjdata};
+        using reader_t = nlohmann::detail::binary_reader<json, decltype(nlohmann::detail::input_adapter(data))>;
 
-        CHECK(std::is_sorted(br.bjd_optimized_type_markers.begin(), br.bjd_optimized_type_markers.end()));
-        CHECK(std::is_sorted(br.bjd_types_map.begin(), br.bjd_types_map.end()));
+        // the excluded optimized-type markers must match binary_writer's
+        // is_bjdata_excluded_type_marker(), which encodes the same 8 markers
+        for (const char marker :
+                {'[', '{', 'S', 'H', 'T', 'F', 'N', 'Z'
+                })
+        {
+            CHECK(reader_t::is_bjd_excluded_optimized_type(static_cast<unsigned char>(marker)));
+        }
+        for (const char marker :
+                {'U', 'i', 'u', 'I', 'm', 'l', 'M', 'L', 'd', 'D', 'C', 'B', 'x'
+                })
+        {
+            CHECK(!reader_t::is_bjd_excluded_optimized_type(static_cast<unsigned char>(marker)));
+        }
+
+        // every dtype marker must round-trip to its ND-array type name
+        const std::vector<std::pair<char, std::string>> types
+        {
+            {'B', "byte"}, {'C', "char"}, {'D', "double"}, {'I', "int16"},
+            {'L', "int64"}, {'M', "uint64"}, {'U', "uint8"}, {'d', "single"},
+            {'i', "int8"}, {'l', "int32"}, {'m', "uint32"}, {'u', "uint16"}
+        };
+        for (const auto& type : types)
+        {
+            const char* name = reader_t::bjd_type_name(static_cast<unsigned char>(type.first));
+            REQUIRE(name != nullptr);
+            CHECK(std::string(name) == type.second);
+        }
+        CHECK(reader_t::bjd_type_name(static_cast<unsigned char>('x')) == nullptr);
     }
 
     SECTION("individual values")
     {
         SECTION("discarded")
         {
-            // discarded values are not serialized
+            // a discarded value cannot be serialized to BJData
             json const j = json::value_t::discarded;
-            const auto result = json::to_bjdata(j);
-            CHECK(result.empty());
+            CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] cannot serialize discarded value to BJData", json::type_error&);
+        }
+
+        SECTION("discarded values nested in a container")
+        {
+            json const discarded = json::value_t::discarded;
+
+            SECTION("in an array")
+            {
+                json const j = {1, discarded, 2};
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] (/1) cannot serialize discarded value to BJData", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] cannot serialize discarded value to BJData", json::type_error&);
+#endif
+            }
+
+            SECTION("as an object value")
+            {
+                json j;
+                j["a"] = 1;
+                j["b"] = discarded;
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] (/b) cannot serialize discarded value to BJData", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] cannot serialize discarded value to BJData", json::type_error&);
+#endif
+            }
+
+            SECTION("nested deeper (array in object in array)")
+            {
+                json inner_array = {1, discarded};
+                json middle_object;
+                middle_object["x"] = inner_array;
+                json const j = {middle_object};
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] (/0/x/1) cannot serialize discarded value to BJData", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j), "[json.exception.type_error.321] cannot serialize discarded value to BJData", json::type_error&);
+#endif
+            }
+
+            SECTION("optimized array of all-discarded elements")
+            {
+                json const j = {discarded, discarded};
+#if JSON_DIAGNOSTICS
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j, true, true), "[json.exception.type_error.321] (/0) cannot serialize discarded value to BJData", json::type_error&);
+#else
+                CHECK_THROWS_WITH_AS(json::to_bjdata(j, true, true), "[json.exception.type_error.321] cannot serialize discarded value to BJData", json::type_error&);
+#endif
+            }
         }
 
         SECTION("null")
@@ -417,7 +357,7 @@ TEST_CASE("BJData")
 
                 SECTION("-32768..-129 (int16)")
                 {
-                    for (int32_t i = -32768; i <= -129; ++i)
+                    for (int32_t i = -32768; i <= -129; i = utils::next_integer_sample(i, -129, 7))
                     {
                         CAPTURE(i)
 
@@ -577,7 +517,7 @@ TEST_CASE("BJData")
 
                 SECTION("256..32767 (int16)")
                 {
-                    for (size_t i = 256; i <= 32767; ++i)
+                    for (size_t i = 256; i <= 32767; i = utils::next_integer_sample(i, static_cast<size_t>(32767), static_cast<size_t>(7)))
                     {
                         CAPTURE(i)
 
@@ -910,7 +850,7 @@ TEST_CASE("BJData")
 
                 SECTION("256..32767 (int16)")
                 {
-                    for (size_t i = 256; i <= 32767; ++i)
+                    for (size_t i = 256; i <= 32767; i = utils::next_integer_sample(i, static_cast<size_t>(32767), static_cast<size_t>(7)))
                     {
                         CAPTURE(i)
 
@@ -1347,6 +1287,32 @@ TEST_CASE("BJData")
                     CHECK_THROWS_WITH_AS(_ = json::from_bjdata(vec2), "[json.exception.parse_error.115] parse error at byte 5: syntax error while parsing BJData high-precision number: invalid number text: 1A", json::parse_error);
                     std::vector<uint8_t> const vec3 = {'H', 'i', 2, '1', '.'};
                     CHECK_THROWS_WITH_AS(_ = json::from_bjdata(vec3), "[json.exception.parse_error.115] parse error at byte 5: syntax error while parsing BJData high-precision number: invalid number text: 1.", json::parse_error);
+                    // Reject NULs where they are read, including trailing NULs and payloads cut off after one.
+                    SECTION("NUL in high-precision number (issue #5753)")
+                    {
+                        for (const auto& vec : std::vector<std::vector<uint8_t>>
+                    {
+                        {'H', 'i', 3, '1', 0, 'x'},
+                        {'H', 'i', 2, '1', 0},
+                        {'H', 'i', 3, '1', 0}
+                    })
+                        {
+                            CAPTURE(vec)
+                            CHECK_THROWS_WITH_AS(_ = json::from_bjdata(vec), "[json.exception.parse_error.115] parse error at byte 5: syntax error while parsing BJData high-precision number: invalid number text; last byte: 0x00", json::parse_error);
+                            CHECK(json::from_bjdata(vec, true, false).is_discarded());
+                            CHECK(json::from_bjdata(vec, false, false).is_discarded());
+                        }
+
+                        std::vector<uint8_t> const nested = {'[', 'H', 'i', 3, '1', 0, 'x', ']'};
+                        CHECK_THROWS_WITH_AS(_ = json::from_bjdata(nested), "[json.exception.parse_error.115] parse error at byte 6: syntax error while parsing BJData high-precision number: invalid number text; last byte: 0x00", json::parse_error);
+                        CHECK(json::from_bjdata(nested, true, false).is_discarded());
+
+                        std::vector<uint8_t> const valid = {'H', 'i', 1, '1'};
+                        const auto j = json::from_bjdata(valid);
+                        CHECK(j.is_number_unsigned());
+                        CHECK(j == json(1));
+                    }
+
                     std::vector<uint8_t> const vec_overflow = {'H', 'i', 5, '1', 'e', '4', '0', '0'};
                     CHECK_THROWS_WITH_AS(_ = json::from_bjdata(vec_overflow), "[json.exception.out_of_range.406] number overflow parsing '1e400'", json::out_of_range);
                     std::vector<uint8_t> const vec4 = {'H', 2, '1', '0'};
@@ -2293,29 +2259,33 @@ TEST_CASE("BJData")
 
         SECTION("start_array() in ndarray _ArraySize_")
         {
+            // _ArrayType_ (2 events: key + string) is now emitted before
+            // _ArraySize_ (see GitHub issue #5661), which shifts the events
+            // below later by the same 2 events
             std::vector<uint8_t> const v = {'[', '$', 'i', '#', '[', '$', 'i', '#', 'i', 2, 2, 1, 1, 2};
-            SaxCountdown scp(2);
+            SaxCountdown scp(4);
             CHECK_FALSE(json::sax_parse(v, &scp, json::input_format_t::bjdata));
         }
 
         SECTION("number_integer() in ndarray _ArraySize_")
         {
             std::vector<uint8_t> const v = {'[', '$', 'U', '#', '[', '$', 'i', '#', 'i', 2, 2, 1, 1, 2};
-            SaxCountdown scp(3);
+            SaxCountdown scp(5);
             CHECK_FALSE(json::sax_parse(v, &scp, json::input_format_t::bjdata));
         }
 
         SECTION("key() in ndarray _ArrayType_")
         {
+            // _ArrayType_ is emitted right after start_object(), before _ArraySize_
             std::vector<uint8_t> const v = {'[', '$', 'U', '#', '[', '$', 'U', '#', 'i', 2, 2, 2, 1, 2, 3, 4};
-            SaxCountdown scp(6);
+            SaxCountdown scp(1);
             CHECK_FALSE(json::sax_parse(v, &scp, json::input_format_t::bjdata));
         }
 
         SECTION("string() in ndarray _ArrayType_")
         {
             std::vector<uint8_t> const v = {'[', '$', 'U', '#', '[', '$', 'U', '#', 'i', 2, 2, 2, 1, 2, 3, 4};
-            SaxCountdown scp(7);
+            SaxCountdown scp(2);
             CHECK_FALSE(json::sax_parse(v, &scp, json::input_format_t::bjdata));
         }
 
@@ -2604,25 +2574,25 @@ TEST_CASE("BJData")
                 // that still round-trips.
 
                 // string data declared as a uint64 array
-                json const j_str = json({{"_ArrayType_", "uint64"}, {"_ArraySize_", {1}}, {"_ArrayData_", {"pointer"}}});
+                json const j_str = json({{"_ArrayType_", "uint64"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {"pointer", "value"}}});
                 const auto out_str = json::to_bjdata(j_str);
                 CHECK(out_str.at(0) == '{');
                 CHECK(json::from_bjdata(out_str) == j_str);
 
                 // integer data declared as a double array
-                json const j_float = json({{"_ArrayType_", "double"}, {"_ArraySize_", {2}}, {"_ArrayData_", {1, 2}}});
+                json const j_float = json({{"_ArrayType_", "double"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1, 2}}});
                 const auto out_float = json::to_bjdata(j_float);
                 CHECK(out_float.at(0) == '{');
                 CHECK(json::from_bjdata(out_float) == j_float);
 
                 // a non-integer shape entry is likewise not treated as an ndarray
-                json const j_size = json({{"_ArrayType_", "uint8"}, {"_ArraySize_", {"x"}}, {"_ArrayData_", {1}}});
+                json const j_size = json({{"_ArrayType_", "uint8"}, {"_ArraySize_", {"x", 1}}, {"_ArrayData_", {1}}});
                 const auto out_size = json::to_bjdata(j_size);
                 CHECK(out_size.at(0) == '{');
                 CHECK(json::from_bjdata(out_size) == j_size);
 
                 // a negative shape entry is not a usable dimension either
-                json const j_neg = json::parse(R"({"_ArrayType_":"uint8","_ArraySize_":[-1],"_ArrayData_":[1]})");
+                json const j_neg = json::parse(R"({"_ArrayType_":"uint8","_ArraySize_":[-1,1],"_ArrayData_":[1]})");
                 const auto out_neg = json::to_bjdata(j_neg);
                 CHECK(out_neg.at(0) == '{');
                 CHECK(json::from_bjdata(out_neg) == j_neg);
@@ -2640,7 +2610,7 @@ TEST_CASE("BJData")
                         {"uint8", "int8", "uint16", "int16", "uint32", "int32", "uint64", "int64", "char"
                         })
                 {
-                    CAPTURE(type);
+                    CAPTURE(type)
                     const std::string text = std::string(R"({"_ArrayType_":")") + type +
                                              R"(","_ArraySize_":[2,3],"_ArrayData_":[1,2,3,4,5,6]})";
                     const auto from_text = json::to_bjdata(json::parse(text));
@@ -2657,14 +2627,14 @@ TEST_CASE("BJData")
                 }
 
                 // negative values under a signed type behave the same way
-                const auto from_neg = json::to_bjdata(json::parse(R"({"_ArrayType_":"int32","_ArraySize_":[2],"_ArrayData_":[-5,7]})"));
+                const auto from_neg = json::to_bjdata(json::parse(R"({"_ArrayType_":"int32","_ArraySize_":[2,1],"_ArrayData_":[-5,7]})"));
                 CHECK(from_neg.at(0) == '[');
-                CHECK(from_neg == json::to_bjdata(json({{"_ArrayType_", "int32"}, {"_ArraySize_", {2}}, {"_ArrayData_", {-5, 7}}})));
+                CHECK(from_neg == json::to_bjdata(json({{"_ArrayType_", "int32"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {-5, 7}}})));
 
                 // and so do the floating point types
-                const auto from_float = json::to_bjdata(json::parse(R"({"_ArrayType_":"double","_ArraySize_":[2],"_ArrayData_":[1.5,2.5]})"));
+                const auto from_float = json::to_bjdata(json::parse(R"({"_ArrayType_":"double","_ArraySize_":[2,1],"_ArrayData_":[1.5,2.5]})"));
                 CHECK(from_float.at(0) == '[');
-                CHECK(from_float == json::to_bjdata(json({{"_ArrayType_", "double"}, {"_ArraySize_", {2}}, {"_ArrayData_", {1.5, 2.5}}})));
+                CHECK(from_float == json::to_bjdata(json({{"_ArrayType_", "double"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1.5, 2.5}}})));
             }
 
             SECTION("optimized ndarray (type and vector-size as 1D array)")
@@ -2835,7 +2805,7 @@ TEST_CASE("BJData")
                 // a single dimension that does not fit into std::size_t is
                 // rejected for the same reason (only observable where
                 // std::size_t is narrower than 64 bit)
-                json j_huge = json({{"_ArrayData_", json::array()}, {"_ArraySize_", {18446744073709551615ull}}, {"_ArrayType_", "uint8"}});
+                json j_huge = json({{"_ArrayData_", json::array()}, {"_ArraySize_", {18446744073709551615ull, 2}}, {"_ArrayType_", "uint8"}});
                 CHECK(json::from_bjdata(json::to_bjdata(j_huge), true, true) == j_huge);
 
                 // a well-formed ndarray is still encoded as one
@@ -2867,6 +2837,21 @@ TEST_CASE("BJData")
                 const auto out_num = json::to_bjdata(j_num);
                 CHECK(out_num.at(0) == '{');
                 CHECK(json::from_bjdata(out_num) == j_num);
+
+                // OSS-Fuzz issue 474400817: an empty object _ArraySize_ was
+                // written as the ND-array header length, which from_bjdata()
+                // could not read back
+                const std::vector<uint8_t> input =
+                {
+                    '[', '{', 'U', 11, '_', 'A', 'r', 'r', 'a', 'y', 'D', 'a', 't', 'a', '_', 'Z',
+                    'U', 11, '_', 'A', 'r', 'r', 'a', 'y', 'T', 'y', 'p', 'e', '_', 'S', 'i', 5, 'i', 'n', 't', '1', '6',
+                    'U', 11, '_', 'A', 'r', 'r', 'a', 'y', 'S', 'i', 'z', 'e', '_', '{', '}', '}', ']'
+                };
+                const json j1 = json::from_bjdata(input);
+                CHECK(j1 == json::parse(R"([{"_ArrayType_":"int16","_ArraySize_":{},"_ArrayData_":null}])"));
+                json j2;
+                CHECK_NOTHROW(j2 = json::from_bjdata(json::to_bjdata(j1, false, false)));
+                CHECK(j2 == j1);
             }
 
             SECTION("ndarray with out-of-range _ArrayData_ elements stays as object")
@@ -2878,42 +2863,149 @@ TEST_CASE("BJData")
                 // object encoding that still round-trips (see GitHub issue #5403)
 
                 // an unsigned element that does not fit uint8
-                json const j_uint8 = json({{"_ArrayType_", "uint8"}, {"_ArraySize_", {2}}, {"_ArrayData_", {1, 256}}});
+                json const j_uint8 = json({{"_ArrayType_", "uint8"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1, 256}}});
                 const auto out_uint8 = json::to_bjdata(j_uint8);
                 CHECK(out_uint8.at(0) == '{');
                 CHECK(json::from_bjdata(out_uint8) == j_uint8);
 
                 // a signed element that does not fit int8
-                json const j_int8 = json({{"_ArrayType_", "int8"}, {"_ArraySize_", {2}}, {"_ArrayData_", {1, 200}}});
+                json const j_int8 = json({{"_ArrayType_", "int8"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1, 200}}});
                 const auto out_int8 = json::to_bjdata(j_int8);
                 CHECK(out_int8.at(0) == '{');
                 CHECK(json::from_bjdata(out_int8) == j_int8);
 
                 // a negative element is likewise out of range for an
                 // unsigned _ArrayType_
-                json const j_uint16_neg = json({{"_ArrayType_", "uint16"}, {"_ArraySize_", {2}}, {"_ArrayData_", {1, -1}}});
+                json const j_uint16_neg = json({{"_ArrayType_", "uint16"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1, -1}}});
                 const auto out_uint16_neg = json::to_bjdata(j_uint16_neg);
                 CHECK(out_uint16_neg.at(0) == '{');
                 CHECK(json::from_bjdata(out_uint16_neg) == j_uint16_neg);
 
                 // a double element that overflows to infinity when narrowed
                 // to the "single" (float) precision named by _ArrayType_
-                json const j_single = json({{"_ArrayType_", "single"}, {"_ArraySize_", {2}}, {"_ArrayData_", {1.5, 1e40}}});
+                json const j_single = json({{"_ArrayType_", "single"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1.5, 1e40}}});
                 const auto out_single = json::to_bjdata(j_single);
                 CHECK(out_single.at(0) == '{');
                 CHECK(json::from_bjdata(out_single) == j_single);
 
+                // a double element that is finite and within the range of "single"
+                // but is not exactly representable as a float, so narrowing it would
+                // silently round it (0.1 is read back as 0.10000000149011612); this,
+                // like the overflow case above, falls back to a plain object (see
+                // GitHub issue #5661)
+                json const j_single_rounded = json({{"_ArrayType_", "single"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1.5, 0.1}}});
+                const auto out_single_rounded = json::to_bjdata(j_single_rounded);
+                CHECK(out_single_rounded.at(0) == '{');
+                CHECK(json::from_bjdata(out_single_rounded) == j_single_rounded);
+
+                // a double element that underflows to 0 when narrowed to "single"
+                json const j_single_underflow = json({{"_ArrayType_", "single"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1.5, 1e-300}}});
+                const auto out_single_underflow = json::to_bjdata(j_single_underflow);
+                CHECK(out_single_underflow.at(0) == '{');
+                CHECK(json::from_bjdata(out_single_underflow) == j_single_underflow);
+
                 // in-range boundary values still use the compact ndarray encoding
-                json const j_uint8_ok = json({{"_ArrayType_", "uint8"}, {"_ArraySize_", {2}}, {"_ArrayData_", {0, 255}}});
-                CHECK(json::to_bjdata(j_uint8_ok) == std::vector<uint8_t>({'[', '$', 'U', '#', '[', 'i', 2, ']', 0, 255}));
+                json const j_uint8_ok = json({{"_ArrayType_", "uint8"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {0, 255}}});
+                CHECK(json::to_bjdata(j_uint8_ok) == std::vector<uint8_t>({'[', '$', 'U', '#', '[', 'i', 2, 'i', 1, ']', 0, 255}));
 
-                json const j_int8_ok = json({{"_ArrayType_", "int8"}, {"_ArraySize_", {2}}, {"_ArrayData_", {-128, 127}}});
-                CHECK(json::to_bjdata(j_int8_ok) == std::vector<uint8_t>({'[', '$', 'i', '#', '[', 'i', 2, ']', 0x80, 0x7F}));
+                json const j_int8_ok = json({{"_ArrayType_", "int8"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {-128, 127}}});
+                CHECK(json::to_bjdata(j_int8_ok) == std::vector<uint8_t>({'[', '$', 'i', '#', '[', 'i', 2, 'i', 1, ']', 0x80, 0x7F}));
 
-                json const j_single_ok = json({{"_ArrayType_", "single"}, {"_ArraySize_", {1}}, {"_ArrayData_", {1.5}}});
+                json const j_single_ok = json({{"_ArrayType_", "single"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1.5, -1.5}}});
                 const auto out_single_ok = json::to_bjdata(j_single_ok);
                 CHECK(out_single_ok.at(0) == '[');
-                CHECK(json::from_bjdata(out_single_ok) == json({1.5f}));
+                CHECK(json::from_bjdata(out_single_ok) == json({{"_ArrayType_", "single"}, {"_ArraySize_", {2, 1}}, {"_ArrayData_", {1.5f, -1.5f}}}));
+            }
+
+            SECTION("ndarray annotation keys are read back in the documented order")
+            {
+                // from_bjdata() must emit the annotation object's keys in the order
+                // used throughout the documentation, _ArrayType_, _ArraySize_,
+                // _ArrayData_: the type marker precedes the dimension vector on the
+                // wire (see get_ubjson_size_type()), so it is known, and emitted,
+                // before _ArraySize_. For a plain json this key order is invisible
+                // (its comparison ignores it), but for an ordered_json it is not (see
+                // GitHub issue #5661).
+                const ordered_json o = ordered_json::parse(R"({"_ArrayType_":"uint8","_ArraySize_":[2,2],"_ArrayData_":[1,2,3,4]})");
+                const auto packed = ordered_json::to_bjdata(o);
+                CHECK(packed.at(0) == '[');
+                const ordered_json o_back = ordered_json::from_bjdata(packed);
+                CHECK(o_back == o);
+                CHECK(o_back.dump() == o.dump());
+            }
+
+            SECTION("ndarray that would not be read back as an annotated object stays as object")
+            {
+                // the reader only restores an annotated object from an ND-array
+                // with at least two non-zero dimensions that is not a 1xN row
+                // vector; any other shape is read back as a plain array. Writing
+                // such an object as an ND-array would drop its annotation, so it
+                // falls back to a plain object encoding that round-trips.
+                for (const char* text :
+                        {
+                            R"({"_ArrayType_":"int16","_ArraySize_":[],"_ArrayData_":[]})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[2],"_ArrayData_":[1,2]})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[1,2],"_ArrayData_":[1,2]})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[0],"_ArrayData_":[]})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[2,0],"_ArrayData_":[]})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[0,2],"_ArrayData_":[]})"
+                        })
+                {
+                    CAPTURE(text)
+                    const json j = json::parse(text);
+                    for (const bool use_size :
+                            {
+                                false, true
+                            })
+                    {
+                        const auto out = json::to_bjdata(j, use_size, use_size);
+                        CHECK(out.at(0) == '{');
+                        CHECK(json::from_bjdata(out) == j);
+                    }
+                }
+
+                // a genuine ND-array still uses the compact encoding and round-trips
+                const json j_2d = json::parse(R"({"_ArrayType_":"int16","_ArraySize_":[2,1],"_ArrayData_":[1,2]})");
+                const auto out_2d = json::to_bjdata(j_2d);
+                CHECK(out_2d.at(0) == '[');
+                CHECK(json::from_bjdata(out_2d) == j_2d);
+            }
+
+            SECTION("ndarray with non-array _ArrayData_ stays as object")
+            {
+                // the elements are written from _ArrayData_ as a flat list, so it
+                // has to be an array: null has size 0, any other scalar has size 1,
+                // and iterating an object visits its values, so each of these could
+                // match the dimensions and be encoded as an unrelated ND-array
+                for (const char* text :
+                        {
+                            R"({"_ArrayType_":"int16","_ArraySize_":[2,1],"_ArrayData_":null})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[2,1],"_ArrayData_":{"a":1,"b":2}})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[1],"_ArrayData_":5})",
+                            R"({"_ArrayType_":"int16","_ArraySize_":[],"_ArrayData_":null})"
+                        })
+                {
+                    CAPTURE(text)
+                    const json j = json::parse(text);
+                    const auto out = json::to_bjdata(j);
+                    CHECK(out.at(0) == '{');
+                    CHECK(json::from_bjdata(out) == j);
+                }
+
+                // OSS-Fuzz issue 563659413: an empty binary _ArraySize_ is written
+                // as a plain object and read back as an empty array, after which
+                // the object with a null _ArrayData_ was encoded as an empty
+                // ND-array and re-read as [], so a second round trip lost the value
+                const std::vector<uint8_t> input =
+                {
+                    '{', 'U', 11, '_', 'A', 'r', 'r', 'a', 'y', 'D', 'a', 't', 'a', '_', 'Z',
+                    'U', 11, '_', 'A', 'r', 'r', 'a', 'y', 'T', 'y', 'p', 'e', '_', 'S', 'i', 5, 'i', 'n', 't', '1', '6',
+                    'U', 11, '_', 'A', 'r', 'r', 'a', 'y', 'S', 'i', 'z', 'e', '_', '[', '$', 'B', '#', '[', ']', '}'
+                };
+                const json j1 = json::from_bjdata(input);
+                const json j2 = json::from_bjdata(json::to_bjdata(j1, false, false));
+                CHECK(j2 == json::parse(R"({"_ArrayType_":"int16","_ArraySize_":[],"_ArrayData_":null})"));
+                CHECK(json::from_bjdata(json::to_bjdata(j2, false, false)) == j2);
             }
 
             SECTION("ndarray with _ArrayType_ \"byte\" is gated by the BJData draft version")
@@ -3673,6 +3765,49 @@ TEST_CASE("BJData")
     }
 }
 
+TEST_CASE("BJData input that cannot be read is discarded by every overload")
+{
+    std::vector<std::uint8_t> input = json::to_bjdata(json({{"a", {1, 2}}}));
+    input.pop_back();
+
+    json _;
+    CHECK_THROWS_AS(_ = json::from_bjdata(input.begin(), input.end()), json::parse_error&);
+    CHECK(json::from_bjdata(input, true, false).is_discarded());
+    CHECK(json::from_bjdata(input.begin(), input.end(), true, false).is_discarded());
+}
+
+TEST_CASE("BJData SAX parsing stops at every event")
+{
+    // Containers are opened and closed by the loop that reads them; a SAX
+    // handler that rejects any event - including the end of a nested
+    // container - must stop the parse right there.
+    const auto count_events = [](const std::vector<std::uint8_t>& input)
+    {
+        int events = 0;
+        while (true)
+        {
+            SaxCountdown scp(events);
+            if (json::sax_parse(input, &scp, json::input_format_t::bjdata))
+            {
+                return events;
+            }
+            ++events;
+            REQUIRE(events < 1000);
+        }
+    };
+
+    // 20 events: every container kind closes inside another one
+    const json j = json::parse(R"({"a": [1, {"b": []}], "c": {"d": [[2]]}})");
+    CHECK(count_events(json::to_bjdata(j)) == 20);
+    CHECK(count_events(json::to_bjdata(j, true)) == 20);
+    CHECK(count_events(json::to_bjdata(j, true, true)) == 20);
+
+    // an ND-array is announced as an annotated object: start_object, then
+    // _ArrayType_, _ArraySize_ and _ArrayData_ with its elements
+    const json ndarray = json::parse(R"({"_ArrayType_": "uint8", "_ArraySize_": [2, 2], "_ArrayData_": [1, 2, 3, 4]})");
+    CHECK(count_events(json::to_bjdata(ndarray, true, true)) == 16);
+}
+
 TEST_CASE("issue #5405 - array reserve for definite-length BJData arrays")
 {
 #if !defined(JSON_NOEXCEPTION)
@@ -3891,6 +4026,43 @@ TEST_CASE("Universal Binary JSON Specification Examples 1")
             std::vector<uint8_t> v = {'S', 'i', 10, 0xD9, 0x85, 0xD8, 0xB1, 0xD8, 0xAD, 0xD8, 0xA8, 0xD8, 0xA7};
             CHECK(json::to_bjdata(j) == v);
             CHECK(json::from_bjdata(v) == j);
+        }
+
+        SECTION("ill-formed UTF-8 (see #5529, #5651)")
+        {
+            // none of the binary format specs requires a decoder to reject
+            // ill-formed UTF-8 in a text string, so a value whose bytes are
+            // not valid UTF-8 (0xC0 0xAE is an overlong encoding of '.')
+            // round-trips byte for byte as a string value; to_bjdata() writes
+            // the bytes unchanged, as before 3.13.0, unless
+            // JSON_STRICT_BINARY_UTF8 is enabled (see
+            // unit-binary_utf8_strict.cpp)
+            const std::vector<uint8_t> v = {'S', 'i', 2, 0xc0, 0xae};
+            json j;
+            CHECK_NOTHROW(j = json::from_bjdata(v));
+            REQUIRE(j.is_string());
+            CHECK(j.get_ref<const json::string_t&>() == std::string("\xc0\xae"));
+            CHECK_THROWS_AS(utils::ignore_return_value(j.dump()), json::type_error&);
+            CHECK(json::from_bjdata(json::to_bjdata(j)) == j);
+
+            // the same bytes as an object key round-trip as well
+            const std::vector<uint8_t> v_key = {'{', 'i', 2, 0xc0, 0xae, 'i', 1, '}'};
+            json j_key;
+            CHECK_NOTHROW(j_key = json::from_bjdata(v_key));
+            REQUIRE(j_key.is_object());
+            CHECK(j_key.contains(std::string("\xc0\xae")));
+            CHECK(json::from_bjdata(json::to_bjdata(j_key)) == j_key);
+
+            CHECK(json::from_bjdata(json::to_bjdata(json("\xFF"))) == json("\xFF"));
+            // a truncated multi-byte sequence
+            CHECK(json::from_bjdata(json::to_bjdata(json("\xC3"))) == json("\xC3"));
+            // an encoded surrogate half (U+D800)
+            CHECK(json::from_bjdata(json::to_bjdata(json("\xED\xA0\x80"))) == json("\xED\xA0\x80"));
+            // an overlong encoding of '.'
+            CHECK(json::from_bjdata(json::to_bjdata(json("\xC0\xAF"))) == json("\xC0\xAF"));
+
+            // an object key with ill-formed UTF-8 is kept the same way
+            CHECK(json::from_bjdata(json::to_bjdata(json{{"\xFF", 1}})) == json{{"\xFF", 1}});
         }
     }
 
@@ -4157,6 +4329,65 @@ TEST_CASE("all BJData first bytes")
 }
 #endif
 
+TEST_CASE("BJData and UBJSON can be written to a string")
+{
+    const std::vector<json> values =
+    {
+        {{"a", {1, 2.5, "x", nullptr}}, {"b", json::binary({1, 2})}},
+        // an annotated ND-array, and objects that only look like one
+        json::parse(R"({"_ArrayType_": "uint8", "_ArraySize_": [2, 2], "_ArrayData_": [1, 2, 3, 4]})"),
+        json::parse(R"({"_ArrayType_": 1, "_ArraySize_": [2, 2], "_ArrayData_": [1, 2, 3, 4]})"),
+        json::parse(R"({"_ArrayType_": "uint8", "_ArraySize_": 4, "_ArrayData_": [1, 2, 3, 4]})"),
+        json::parse(R"({"_ArrayType_": "uint8", "_ArraySize_": [2, -2], "_ArrayData_": [1, 2, 3, 4]})"),
+        json::parse(R"({"_ArrayType_": "uint8", "_ArraySize_": [2, 2], "_ArrayData_": [1, 2, 3]})"),
+        json::parse(R"({"_ArrayType_": "uint8", "_ArraySize_": [2, 2], "_ArrayData_": 1})"),
+    };
+
+    // compared byte by byte: building a std::string from the bytes would
+    // convert them implicitly, which -fsanitize=integer reports for bytes of
+    // 0x80 and above
+    const auto same_bytes = [](const std::vector<std::uint8_t>& bytes, const std::string & text)
+    {
+        return bytes.size() == text.size() && std::equal(bytes.begin(), bytes.end(), text.begin(), [](std::uint8_t byte, char c)
+        {
+            return byte == static_cast<std::uint8_t>(c);
+        });
+    };
+
+    for (const auto& j : values)
+    {
+        CAPTURE(j.dump())
+        for (const bool use_size :
+                {
+                    false, true
+                })
+        {
+            for (const bool use_type :
+                    {
+                        false, true
+                    })
+            {
+                if (use_type && !use_size)
+                {
+                    continue;
+                }
+                CAPTURE(use_size)
+                CAPTURE(use_type)
+
+                const auto bjdata = json::to_bjdata(j, use_size, use_type);
+                std::string bjdata_string;
+                json::to_bjdata(j, bjdata_string, use_size, use_type);
+                CHECK(same_bytes(bjdata, bjdata_string));
+
+                const auto ubjson = json::to_ubjson(j, use_size, use_type);
+                std::string ubjson_string;
+                json::to_ubjson(j, ubjson_string, use_size, use_type);
+                CHECK(same_bytes(ubjson, ubjson_string));
+            }
+        }
+    }
+}
+
 TEST_CASE("BJData use_type requires use_size")
 {
     SECTION("non-empty object throws other_error.502")
@@ -4171,6 +4402,17 @@ TEST_CASE("BJData use_type requires use_size")
     {
         const json j = {1, 2, 3};
         CHECK_THROWS_WITH_AS(json::to_bjdata(j, false, true),
+                             "[json.exception.other_error.502] use_type requires use_size = true",
+                             json::other_error&);
+    }
+
+    SECTION("non-empty binary value throws other_error.502")
+    {
+        const json j = json::binary({1, 2, 3});
+        CHECK_THROWS_WITH_AS(json::to_bjdata(j, false, true),
+                             "[json.exception.other_error.502] use_type requires use_size = true",
+                             json::other_error&);
+        CHECK_THROWS_WITH_AS(json::to_ubjson(j, false, true),
                              "[json.exception.other_error.502] use_type requires use_size = true",
                              json::other_error&);
     }
@@ -4197,6 +4439,93 @@ TEST_CASE("BJData use_type requires use_size")
         CHECK_NOTHROW(json::to_bjdata(j, true, false));
         CHECK_NOTHROW(json::to_bjdata(j, true, true));
     }
+}
+
+TEST_CASE("BJData round-trip invariants")
+{
+    // This checks what the parse_bjdata_fuzzer driver checks (see
+    // tests/src/fuzzer-parse_bjdata.cpp), so that a regression shows up in CI
+    // rather than as an OSS-Fuzz report: every value from_bjdata() returns
+    // (j1) can be serialized with any combination of options, the result can
+    // be parsed back (j2), and serializing j2 again with the same options
+    // yields a value-equal result.
+    //
+    // Beyond the driver, this also checks that j2 equals j1 and that
+    // serializing j2 reproduces the exact bytes, both except for values that
+    // contain a binary value: a binary value is only written as a binary
+    // value with Draft 3's optimized binary array, and otherwise read back as
+    // an array of integers, for which the writer may choose different (but
+    // equally valid) type markers when it is serialized again (see #5494).
+    //
+    // Values are compared with dump() rather than operator==, because a NaN
+    // never compares equal to itself.
+    struct options
+    {
+        bool use_size;
+        bool use_type;
+        json::bjdata_version_t version;
+    };
+    const std::vector<options> all_options =
+    {
+        {false, false, json::bjdata_version_t::draft2},
+        {true, false, json::bjdata_version_t::draft2},
+        {true, true, json::bjdata_version_t::draft2},
+        {false, false, json::bjdata_version_t::draft3},
+        {true, false, json::bjdata_version_t::draft3},
+        {true, true, json::bjdata_version_t::draft3},
+    };
+
+    for (const auto& j0 : utils::round_trip_corpus::values())
+    {
+        // turn the corpus value into a value as from_bjdata() returns it
+        for (const auto& initial : all_options)
+        {
+            const json j1 = json::from_bjdata(json::to_bjdata(j0, initial.use_size, initial.use_type, initial.version));
+            const bool has_binary = utils::round_trip_corpus::contains_binary(j1);
+
+            for (const auto& o : all_options)
+            {
+                INFO("j1 = " << j1.dump() << ", use_size = " << o.use_size << ", use_type = " << o.use_type
+                     << ", draft3 = " << (o.version == json::bjdata_version_t::draft3));
+
+                const std::vector<std::uint8_t> vec = json::to_bjdata(j1, o.use_size, o.use_type, o.version);
+                json j2;
+                // anything the library writes must be parsable by the library
+                REQUIRE_NOTHROW(j2 = json::from_bjdata(vec));
+                const std::vector<std::uint8_t> vec2 = json::to_bjdata(j2, o.use_size, o.use_type, o.version);
+                CHECK(json::from_bjdata(vec2).dump() == j2.dump());
+
+                if (!has_binary)
+                {
+                    CHECK(j2.dump() == j1.dump());
+                    CHECK(vec2 == vec);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("BJData round trip of a binary value is value-stable, not byte-stable")
+{
+    // OSS-Fuzz issue 474480402: a Draft 3 optimized binary array is read as a
+    // binary value, which to_bjdata() writes in the default Draft 2 mode as a
+    // plain array of uint8 numbers. That is read back as an array of numbers,
+    // for which the writer then picks the smallest type marker, int8 ('i'),
+    // so re-serializing changes the bytes, but not the value. This is the
+    // exception described in the "Round trips" note of the BJData
+    // documentation, and why the fuzzer checks value stability (see #5494).
+    const std::vector<uint8_t> input = {'[', '$', 'B', '#', 'U', 1, 0x20};
+    const json j1 = json::from_bjdata(input);
+    CHECK(j1 == json::binary({0x20}));
+
+    const std::vector<uint8_t> vec = json::to_bjdata(j1, false, false);
+    CHECK(vec == std::vector<uint8_t>({'[', 'U', 0x20, ']'}));
+    const json j2 = json::from_bjdata(vec);
+    CHECK(j2 == json::array({0x20}));
+
+    const std::vector<uint8_t> vec2 = json::to_bjdata(j2, false, false);
+    CHECK(vec2 == std::vector<uint8_t>({'[', 'i', 0x20, ']'}));
+    CHECK(json::from_bjdata(vec2) == j2);
 }
 
 TEST_CASE("BJData roundtrips" * doctest::skip())
@@ -4251,45 +4580,27 @@ TEST_CASE("BJData roundtrips" * doctest::skip())
         {
             CAPTURE(filename)
 
+            std::ifstream f_json(filename);
+            const json j1 = json::parse(f_json);
+            auto packed = utils::read_binary_file(filename + ".bjdata");
+
             {
                 INFO_WITH_TEMP(filename + ": std::vector<uint8_t>");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                const json j1 = json::parse(f_json);
-
-                // parse BJData file
-                auto packed = utils::read_binary_file(filename + ".bjdata");
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_bjdata(packed));
-
-                // compare parsed JSON values
                 CHECK(j1 == j2);
             }
 
             {
                 INFO_WITH_TEMP(filename + ": std::ifstream");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                const json j1 = json::parse(f_json);
-
-                // parse BJData file
                 std::ifstream f_bjdata(filename + ".bjdata", std::ios::binary);
                 json j2;
                 CHECK_NOTHROW(j2 = json::from_bjdata(f_bjdata));
-
-                // compare parsed JSON values
                 CHECK(j1 == j2);
             }
 
             {
                 INFO_WITH_TEMP(filename + ": output to output adapters");
-                // parse JSON file
-                std::ifstream f_json(filename);
-                json const j1 = json::parse(f_json);
-
-                // parse BJData file
-                auto packed = utils::read_binary_file(filename + ".bjdata");
-
                 {
                     INFO_WITH_TEMP(filename + ": output adapters: std::vector<uint8_t>");
                     std::vector<uint8_t> vec;
@@ -4297,6 +4608,82 @@ TEST_CASE("BJData roundtrips" * doctest::skip())
                     CHECK(vec == packed);
                 }
             }
+        }
+    }
+}
+
+TEST_CASE("issue #5648 - from_bjdata(ptr, len) must read len bytes, not treat ptr as a C string")
+{
+    // to_bjdata() encodes the integer 0 as the two bytes 'i' 0x00 (a BJData
+    // type marker followed by the value byte 0x00), so the packed data
+    // below contains a 0x00 byte before its end.
+    const json j = {{"a", 0}};
+    const std::vector<std::uint8_t> packed = json::to_bjdata(j);
+    bool contains_nul = false;
+    for (const auto byte : packed)
+    {
+        contains_nul |= (byte == 0x00);
+    }
+    REQUIRE(contains_nul);
+
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+    // before the fix, from_bjdata had no (ptr, len) overload, so this call
+    // bound to from_bjdata(InputType&&, bool strict) instead: ptr was read
+    // as a NUL-terminated C string (stopping at the embedded 0x00 byte), and
+    // len was silently converted to the strict flag. The deprecated
+    // overload added for this issue forwards to from_bjdata(ptr, ptr + len,
+    // ...) instead, like from_ubjson's deprecated (ptr, len) overload does.
+    json result;
+    CHECK_NOTHROW(result = json::from_bjdata(packed.data(), packed.size()));
+    CHECK(result == j);
+
+    // len must not collapse into the strict flag either
+    CHECK(json::from_bjdata(packed.data(), packed.size(), false) == j);
+#endif
+}
+
+TEST_CASE("BJData large strings and binaries (chunked reader)")
+{
+    // Strings share get_ubjson_string() -> get_string() -> get_bytes() with
+    // plain UBJSON. Binary values are different: only a Draft 3 optimized
+    // array (type marker 'B') is read back as a binary value, through
+    // get_binary() -> get_bytes() (see parse_ubjson_internal()'s "If BJData
+    // type marker is 'B'" branch); Draft 2 (the default) writes a binary
+    // value as a plain array of uint8_t numbers instead (see the "round trip
+    // of a binary value is value-stable, not byte-stable" test above), which
+    // never reaches get_bytes(). Both reads happen in bounded chunks
+    // (binary_reader.hpp, chunk_size == 4096); check lengths around and
+    // beyond that size, for both vector (iterator) and pointer inputs.
+    for (const std::size_t len :
+            {
+                std::size_t{0}, std::size_t{1}, std::size_t{4095}, std::size_t{4096},
+                std::size_t{4097}, std::size_t{8192}, std::size_t{100000}
+            })
+    {
+        CAPTURE(len)
+
+        // string
+        const json j_string = std::string(len, 'x');
+        const std::vector<std::uint8_t> v_string = json::to_bjdata(j_string);
+        CHECK(json::from_bjdata(v_string) == j_string);
+        // pointer input exercises the std::memcpy fast path
+        CHECK(json::from_bjdata(reinterpret_cast<const char*>(v_string.data()),
+                                reinterpret_cast<const char*>(v_string.data()) + v_string.size()) == j_string);
+
+        // binary, forced into the Draft 3 optimized ('B' marker) encoding
+        const json j_binary = json::binary(std::vector<std::uint8_t>(len, 0xCD));
+        const std::vector<std::uint8_t> v_binary = json::to_bjdata(j_binary, true, true, json::bjdata_version_t::draft3);
+        CHECK(json::from_bjdata(v_binary) == j_binary);
+        CHECK(json::from_bjdata(reinterpret_cast<const char*>(v_binary.data()),
+                                reinterpret_cast<const char*>(v_binary.data()) + v_binary.size()) == j_binary);
+
+        // a truncated payload must still be reported as an error
+        if (len > 16)
+        {
+            std::vector<std::uint8_t> truncated = v_string;
+            truncated.resize(truncated.size() - 8);
+            json _;
+            CHECK_THROWS_AS(_ = json::from_bjdata(truncated), json::parse_error);
         }
     }
 }

@@ -120,6 +120,39 @@ BENCHMARK_CAPTURE(ParseIndented, citm_catalog / 4, TEST_DATA_DIRECTORY "/nativej
 BENCHMARK_CAPTURE(ParseIndented, twitter / 4,      TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json",      4);
 
 //////////////////////////////////////////////////////////////////////////////
+// parse JSON from string into an ordered_json
+//
+// Same as ParseString above, but with nlohmann::ordered_json, whose objects
+// keep their members in a vector: the pair of rows shows what preserving the
+// insertion order costs.
+//////////////////////////////////////////////////////////////////////////////
+
+static void ParseStringOrdered(benchmark::State& state, const char* filename)
+{
+    std::ifstream f(filename);
+    std::string str((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+    while (state.KeepRunning())
+    {
+        state.PauseTiming();
+        auto* j = new nlohmann::ordered_json();
+        state.ResumeTiming();
+
+        *j = nlohmann::ordered_json::parse(str);
+
+        state.PauseTiming();
+        delete j;
+        state.ResumeTiming();
+    }
+
+    state.SetBytesProcessed(state.iterations() * str.size());
+}
+BENCHMARK_CAPTURE(ParseStringOrdered, jeopardy,     TEST_DATA_DIRECTORY "/jeopardy/jeopardy.json");
+BENCHMARK_CAPTURE(ParseStringOrdered, canada,       TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json");
+BENCHMARK_CAPTURE(ParseStringOrdered, citm_catalog, TEST_DATA_DIRECTORY "/nativejson-benchmark/citm_catalog.json");
+BENCHMARK_CAPTURE(ParseStringOrdered, twitter,      TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json");
+
+//////////////////////////////////////////////////////////////////////////////
 // serialize JSON
 //////////////////////////////////////////////////////////////////////////////
 
@@ -131,7 +164,8 @@ static void Dump(benchmark::State& state, const char* filename, int indent)
 
     while (state.KeepRunning())
     {
-        j.dump(indent);
+        std::string output = j.dump(indent);
+        benchmark::DoNotOptimize(output);
     }
 
     state.SetBytesProcessed(state.iterations() * j.dump(indent).size());
@@ -273,7 +307,8 @@ enum class binary_format
     ubjson_optimized,
     bjdata,
     bjdata_optimized,
-    bson
+    bson,
+    bon8
 };
 
 static std::vector<std::uint8_t> to_binary(const json& j, const binary_format format)
@@ -292,6 +327,8 @@ static std::vector<std::uint8_t> to_binary(const json& j, const binary_format fo
             return json::to_bjdata(j);
         case binary_format::bjdata_optimized:
             return json::to_bjdata(j, true, true);
+        case binary_format::bon8:
+            return json::to_bon8(j);
         case binary_format::bson:
         default:
             return json::to_bson(j);
@@ -312,6 +349,8 @@ static json from_binary(const std::vector<std::uint8_t>& bytes, const binary_for
         case binary_format::bjdata:
         case binary_format::bjdata_optimized:
             return json::from_bjdata(bytes);
+        case binary_format::bon8:
+            return json::from_bon8(bytes);
         case binary_format::bson:
         default:
             return json::from_bson(bytes);
@@ -332,6 +371,8 @@ static json from_binary(std::FILE* file, const binary_format format)
         case binary_format::bjdata:
         case binary_format::bjdata_optimized:
             return json::from_bjdata(file);
+        case binary_format::bon8:
+            return json::from_bon8(file);
         case binary_format::bson:
         default:
             return json::from_bson(file);
@@ -406,6 +447,10 @@ BENCHMARK_CAPTURE(FromBinaryBuffer, bjdata / canada, TEST_DATA_DIRECTORY "/nativ
 BENCHMARK_CAPTURE(FromBinaryBuffer, bjdata / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::bjdata);
 BENCHMARK_CAPTURE(FromBinaryBuffer, bjdata_optimized / canada, TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json", binary_format::bjdata_optimized);
 BENCHMARK_CAPTURE(FromBinaryBuffer, bjdata_optimized / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::bjdata_optimized);
+BENCHMARK_CAPTURE(FromBinaryBuffer, bon8 / jeopardy, TEST_DATA_DIRECTORY "/jeopardy/jeopardy.json", binary_format::bon8);
+BENCHMARK_CAPTURE(FromBinaryBuffer, bon8 / canada, TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json", binary_format::bon8);
+BENCHMARK_CAPTURE(FromBinaryBuffer, bon8 / citm_catalog, TEST_DATA_DIRECTORY "/nativejson-benchmark/citm_catalog.json", binary_format::bon8);
+BENCHMARK_CAPTURE(FromBinaryBuffer, bon8 / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::bon8);
 // BSON requires an object at the top level, so the array-rooted test files
 // (jeopardy and the regression files) cannot be captured here
 BENCHMARK_CAPTURE(FromBinaryBuffer, bson / canada, TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json", binary_format::bson);
@@ -449,6 +494,8 @@ BENCHMARK_CAPTURE(FromBinaryFile, cbor / twitter, TEST_DATA_DIRECTORY "/nativejs
 BENCHMARK_CAPTURE(FromBinaryFile, ubjson / canada, TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json", binary_format::ubjson);
 BENCHMARK_CAPTURE(FromBinaryFile, ubjson / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::ubjson);
 BENCHMARK_CAPTURE(FromBinaryFile, bjdata / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::bjdata);
+BENCHMARK_CAPTURE(FromBinaryFile, bon8 / canada, TEST_DATA_DIRECTORY "/nativejson-benchmark/canada.json", binary_format::bon8);
+BENCHMARK_CAPTURE(FromBinaryFile, bon8 / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::bon8);
 BENCHMARK_CAPTURE(FromBinaryFile, bson / twitter, TEST_DATA_DIRECTORY "/nativejson-benchmark/twitter.json", binary_format::bson);
 
 //////////////////////////////////////////////////////////////////////////////
@@ -529,18 +576,21 @@ BENCHMARK_CAPTURE(FromBinaryShape, nested / msgpack, make_nested, binary_format:
 BENCHMARK_CAPTURE(FromBinaryShape, nested / ubjson, make_nested, binary_format::ubjson);
 BENCHMARK_CAPTURE(FromBinaryShape, nested / bjdata, make_nested, binary_format::bjdata);
 BENCHMARK_CAPTURE(FromBinaryShape, nested / bson, make_nested, binary_format::bson);
+BENCHMARK_CAPTURE(FromBinaryShape, nested / bon8, make_nested, binary_format::bon8);
 BENCHMARK_CAPTURE(FromBinaryShape, containers / cbor, make_containers, binary_format::cbor);
 BENCHMARK_CAPTURE(FromBinaryShape, containers / msgpack, make_containers, binary_format::msgpack);
 BENCHMARK_CAPTURE(FromBinaryShape, containers / ubjson, make_containers, binary_format::ubjson);
 BENCHMARK_CAPTURE(FromBinaryShape, containers / ubjson_optimized, make_containers, binary_format::ubjson_optimized);
 BENCHMARK_CAPTURE(FromBinaryShape, containers / bjdata, make_containers, binary_format::bjdata);
 BENCHMARK_CAPTURE(FromBinaryShape, containers / bson, make_containers, binary_format::bson);
+BENCHMARK_CAPTURE(FromBinaryShape, containers / bon8, make_containers, binary_format::bon8);
 // BSON names every array element, so a large array measures key generation
 // rather than scalar decoding and is left out here
 BENCHMARK_CAPTURE(FromBinaryShape, scalars / cbor, make_scalars, binary_format::cbor);
 BENCHMARK_CAPTURE(FromBinaryShape, scalars / msgpack, make_scalars, binary_format::msgpack);
 BENCHMARK_CAPTURE(FromBinaryShape, scalars / ubjson, make_scalars, binary_format::ubjson);
 BENCHMARK_CAPTURE(FromBinaryShape, scalars / bjdata, make_scalars, binary_format::bjdata);
+BENCHMARK_CAPTURE(FromBinaryShape, scalars / bon8, make_scalars, binary_format::bon8);
 
 /*!
 @brief parse an indefinite-length CBOR string

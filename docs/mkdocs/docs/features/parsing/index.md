@@ -3,6 +3,16 @@
 This library can create a JSON value from a wide range of inputs. This page gives an overview of the available parsing
 functions and how they behave; the linked pages go into more detail.
 
+```mermaid
+flowchart LR
+    I["JSON input"] --> P["parse()"]
+    I --> S["sax_parse()"]
+    I --> A["accept()"]
+    P -->|"optional parser callback filters values"| D["basic_json value (DOM)"]
+    S --> H["events delivered to a user SAX handler"]
+    A --> V["bool: is the input valid JSON?"]
+```
+
 ## Input
 
 The [`parse`](../../api/basic_json/parse.md) function reads a JSON value from an input. The input can be
@@ -41,7 +51,8 @@ document followed by trailing bytes" is accepted rather than rejected. If you ar
 reject any input that is not exactly one JSON document, prefer `parse`.
 
 When using `operator>>` to read several concatenated values this way, a value that is a number must be followed by
-whitespace, because `operator>>` consumes the character that terminates a number — see the
+whitespace, because `operator>>` consumes the character that terminates a number, unless
+[`JSON_PRECISE_STREAM_POSITION`](../../api/macros/json_precise_stream_position.md) is defined to `1` — see the
 [`operator>>` notes](../../api/operator_gtgt.md#notes) for details and examples.
 
 ## SAX vs. DOM parsing
@@ -75,3 +86,4 @@ options.
 - [parser callbacks](parser_callbacks.md) - influence the parsing by a callback function
 - [SAX interface](sax_interface.md) - implement a custom SAX handler
 - [parsing and exceptions](parse_exceptions.md) - control error handling
+- [parsing untrusted input](untrusted_input.md) - what to consider when parsing input from untrusted sources

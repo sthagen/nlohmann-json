@@ -9,6 +9,14 @@
 #include "doctest_compatibility.h"
 
 #define JSON_TESTS_PRIVATE
+// capture whether JSON_DELETE_DEPRECATED_FUNCTIONS was enabled on the command
+// line *before* including json.hpp, since the library #undefs it once the header
+// has been fully processed (see include/nlohmann/detail/macro_unscope.hpp); the
+// tests of deprecated functions are skipped if these functions are deleted
+#if defined(JSON_DELETE_DEPRECATED_FUNCTIONS) && (JSON_DELETE_DEPRECATED_FUNCTIONS == 1)
+    #define JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+#endif
+
 #include <nlohmann/json.hpp>
 using nlohmann::json;
 #ifdef JSON_TEST_NO_GLOBAL_UDLS
@@ -380,6 +388,26 @@ TEST_CASE("JSON pointers")
 
             DOCTEST_MSVC_SUPPRESS_WARNING_POP
 
+            {
+                // contains() must not throw for an empty reference token if the current
+                // value is an array (cf. #5395) -- at() still reports out_of_range.404
+                json j_nested = {{"a", {1, 2}}};
+                const json& j_nested_const = j_nested;
+                json::json_pointer const jp("/a/");
+                std::string const throw_msg = "[json.exception.out_of_range.404] unresolved reference token ''";
+
+                CHECK_THROWS_WITH_AS(j_nested.at(jp), throw_msg.c_str(), json::out_of_range&);
+                CHECK_THROWS_WITH_AS(j_nested_const.at(jp), throw_msg.c_str(), json::out_of_range&);
+
+                CHECK(j_nested.contains(json::json_pointer("/a/1")));
+                CHECK(!j_nested.contains(jp));
+                CHECK(!j_nested_const.contains(jp));
+
+                // same for an empty reference token on a top-level array
+                CHECK(!j.contains(json::json_pointer("/")));
+                CHECK(!j_const.contains(json::json_pointer("/")));
+            }
+
             CHECK_THROWS_WITH_AS(j.at("/one"_json_pointer) = 1,
                                  "[json.exception.parse_error.109] parse error: array index 'one' is not a number", json::parse_error&);
             CHECK_THROWS_WITH_AS(j_const.at("/one"_json_pointer) == 1,
@@ -392,6 +420,27 @@ TEST_CASE("JSON pointers")
 
             CHECK_THROWS_WITH_AS(json({{"/list/0", 1}, {"/list/1", 2}, {"/list/three", 3}}).unflatten(),
             "[json.exception.parse_error.109] parse error: array index 'three' is not a number", json::parse_error&);
+
+            // a single-character token that is not a digit is reported like a
+            // longer one (parse_error.109), not as unresolved (out_of_range.404)
+            CHECK_THROWS_WITH_AS(j["/x"_json_pointer] = 1,
+                                 "[json.exception.parse_error.109] parse error: array index 'x' is not a number", json::parse_error&);
+            CHECK_THROWS_WITH_AS(j_const["/x"_json_pointer] == 1,
+                                 "[json.exception.parse_error.109] parse error: array index 'x' is not a number", json::parse_error&);
+            CHECK_THROWS_WITH_AS(j.at("/x"_json_pointer) = 1,
+                                 "[json.exception.parse_error.109] parse error: array index 'x' is not a number", json::parse_error&);
+            CHECK_THROWS_WITH_AS(j_const.at("/x"_json_pointer) == 1,
+                                 "[json.exception.parse_error.109] parse error: array index 'x' is not a number", json::parse_error&);
+            CHECK_THROWS_WITH_AS(j.at("/+"_json_pointer),
+                                 "[json.exception.parse_error.109] parse error: array index '+' is not a number", json::parse_error&);
+            CHECK(!j.contains("/x"_json_pointer));
+            CHECK(!j_const.contains("/x"_json_pointer));
+            CHECK_THROWS_WITH_AS(json({{"/list/0", 1}, {"/list/x", 2}}).unflatten(),
+            "[json.exception.parse_error.109] parse error: array index 'x' is not a number", json::parse_error&);
+
+            // "-" is a valid reference token, so it is still reported as unresolved
+            CHECK_THROWS_WITH_AS(json({{"/list/0", 1}, {"/list/-", 2}}).unflatten(),
+            "[json.exception.out_of_range.404] unresolved reference token '-'", json::out_of_range&);
 
             // assign to "-"
             j["/-"_json_pointer] = 99;
@@ -544,7 +593,9 @@ TEST_CASE("JSON pointers")
             std::stringstream ss;
             ss << ptr;
             CHECK(ptr.to_string() == ptr_str);
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
             CHECK(std::string(ptr) == ptr_str);
+#endif
             CHECK(ss.str() == ptr_str);
         }
     }
@@ -724,8 +775,6 @@ TEST_CASE("JSON pointers")
 
     SECTION("equality comparison")
     {
-        const char* ptr_cpstring = "/foo/bar";
-        const char ptr_castring[] = "/foo/bar"; // NOLINT(misc-const-correctness,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
         std::string ptr_string{"/foo/bar"};
         auto ptr1 = json::json_pointer(ptr_string);
         auto ptr2 = json::json_pointer(ptr_string);
@@ -734,6 +783,12 @@ TEST_CASE("JSON pointers")
         // JSON_HAS_CPP_20
 
         CHECK(ptr1 == ptr2);
+
+        CHECK_FALSE(ptr1 != ptr2);
+
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
+        const char* ptr_cpstring = "/foo/bar";
+        const char ptr_castring[] = "/foo/bar"; // NOLINT(misc-const-correctness,hicpp-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
 
         CHECK(ptr1 == "/foo/bar");
         CHECK(ptr1 == ptr_cpstring);
@@ -744,8 +799,6 @@ TEST_CASE("JSON pointers")
         CHECK(ptr_cpstring == ptr1);
         CHECK(ptr_castring == ptr1);
         CHECK(ptr_string == ptr1);
-
-        CHECK_FALSE(ptr1 != ptr2);
 
         CHECK_FALSE(ptr1 != "/foo/bar");
         CHECK_FALSE(ptr1 != ptr_cpstring);
@@ -768,6 +821,7 @@ TEST_CASE("JSON pointers")
             CHECK_THROWS_WITH_AS("/~~" == ptr1,
                                  "[json.exception.parse_error.108] parse error: escape character '~' must be followed with '0' or '1'", json::parse_error&);
         }
+#endif
     }
 
     SECTION("less-than comparison")
@@ -819,6 +873,7 @@ TEST_CASE("JSON pointers")
         json_ptr_j ptr_j{ptr_string};
         json_ptr_oj ptr_oj{ptr_string};
 
+#ifndef JSON_TEST_DEPRECATED_FUNCTIONS_DELETED
         CHECK(j.contains(ptr));
         CHECK(j.contains(ptr_j));
         CHECK(j.contains(ptr_oj));
@@ -831,6 +886,7 @@ TEST_CASE("JSON pointers")
 
         CHECK(j.value(ptr, "x") == j.value(ptr_j, "x"));
         CHECK(j.value(ptr, "x") == j.value(ptr_oj, "x"));
+#endif
 
         CHECK(ptr == ptr_j);
         CHECK(ptr == ptr_oj);
@@ -858,6 +914,25 @@ TEST_CASE("JSON pointers")
         }
     }
 
+    SECTION("value(json_pointer, default) with ordered_json #5664")
+    {
+        // ordered_json's transparent object comparator made value()'s
+        // is_comparable_with_object_key check (which passes the pointer as
+        // a reference) instantiate the deprecated json_pointer/string
+        // comparison; this must compile without relying on it. The
+        // deprecation warning itself is not observable here, since the
+        // unit test build disables -Wdeprecated-declarations (see
+        // cmake/clang_flags.cmake); it was checked manually instead.
+        const nlohmann::ordered_json j = {{"n", 1}, {"s", "text"}};
+        const nlohmann::ordered_json::json_pointer ptr_n("/n");
+        const nlohmann::ordered_json::json_pointer ptr_s("/s");
+        const nlohmann::ordered_json::json_pointer ptr_missing("/missing");
+
+        CHECK(j.value(ptr_n, 0) == 1);
+        CHECK(j.value(ptr_s, std::string("x")) == "text");
+        CHECK(j.value(ptr_missing, 42) == 42);
+    }
+
     // build with C++20
     // JSON_HAS_CPP_20
 #if defined(__cpp_char8_t)
@@ -871,4 +946,128 @@ TEST_CASE("JSON pointers")
         CHECK(j[p2] == 123);
     }
 #endif
+}
+
+TEST_CASE("unescaping keeps a '~' that does not start an escape sequence")
+{
+    // the parser of a JSON pointer rejects such reference tokens before it
+    // unescapes them, so this is only reachable by calling unescape directly
+    std::string s = "a~2b~";
+    nlohmann::detail::unescape(s);
+    CHECK(s == "a~2b~");
+
+    s = "~0~1~";
+    nlohmann::detail::unescape(s);
+    CHECK(s == "~/~");
+}
+
+TEST_CASE("flatten of structured values")
+{
+    SECTION("values nested too deeply for the call stack (#5393)")
+    {
+        // flatten() used to recurse once per nesting level
+        const std::size_t depth = 100000;
+        for (const bool objects :
+                {
+                    false, true
+                })
+        {
+            CAPTURE(objects)
+            std::string text;
+            std::string path;
+            for (std::size_t i = 0; i < depth; ++i)
+            {
+                text += objects ? "{\"a\":" : "[";
+                path += objects ? "/a" : "/0";
+            }
+            text += "0";
+            text += std::string(depth, objects ? '}' : ']');
+            const auto value = json::parse(text);
+
+            const auto flat = value.flatten();
+            REQUIRE(flat.size() == 1);
+            REQUIRE(flat.begin().key().size() == path.size());
+            CHECK(flat.begin().key() == path);
+            CHECK(flat.begin().value() == 0);
+
+            // unflatten() is linear in the depth, so the value roundtrips
+            CHECK(flat.unflatten() == value);
+        }
+    }
+
+    SECTION("unflatten of a deeply nested pointer")
+    {
+        const std::size_t depth = 100000;
+        for (const bool objects :
+                {
+                    false, true
+                })
+        {
+            CAPTURE(objects)
+            std::string path;
+            for (std::size_t i = 0; i < depth; ++i)
+            {
+                path += objects ? "/a" : "/0";
+            }
+
+            json flat = json::object();
+            flat[path] = 1;
+            const json value = flat.unflatten();
+
+            // walk down iteratively
+            std::size_t levels = 0;
+            const json* current = &value;
+            while (objects ? current->is_object() : current->is_array())
+            {
+                REQUIRE(current->size() == 1);
+                current = objects ? &current->at("a") : &current->at(0);
+                ++levels;
+            }
+            CHECK(levels == depth);
+            CHECK(*current == 1);
+        }
+    }
+
+    SECTION("unflatten does not depend on the iteration order")
+    {
+        // the "0" key comes after its sibling in iteration order
+        const nlohmann::ordered_json flat_array = nlohmann::ordered_json::parse(R"({"/a/1": 2, "/a/0": 1})");
+        CHECK(flat_array.unflatten() == nlohmann::ordered_json::parse(R"({"a": [1, 2]})"));
+
+        const nlohmann::ordered_json flat_object = nlohmann::ordered_json::parse(R"({"/b/1": 2})");
+        CHECK(flat_object.unflatten() == nlohmann::ordered_json::parse(R"({"b": {"1": 2}})"));
+    }
+
+    SECTION("objects and arrays interleaved")
+    {
+        const json value =
+        {
+            {"a", {1, {{"b", json::array()}, {"c", json::object()}}, json::array({{{"x~/", {true, nullptr}}}})}},
+            {"a/b", {{"~", 1}}},
+            {"z", "s"}
+        };
+
+        const json expected =
+        {
+            {"/a/0", 1},
+            {"/a/1/b", nullptr},
+            {"/a/1/c", nullptr},
+            {"/a/2/0/x~0~1/0", true},
+            {"/a/2/0/x~0~1/1", nullptr},
+            {"/a~1b/~0", 1},
+            {"/z", "s"}
+        };
+
+        CHECK(value.flatten() == expected);
+    }
+
+    SECTION("order of the entries of an ordered_json")
+    {
+        const auto value = nlohmann::ordered_json::parse(
+                               R"({"z":"s","a/b":{"~":1,"k":[]},"a":[1,{"c":{},"b":[]},[{"x~/":[true,null],"w":2}]]})");
+
+        const auto flat = value.flatten();
+        CHECK(flat.dump() ==
+              R"({"/z":"s","/a~1b/~0":1,"/a~1b/k":null,"/a/0":1,"/a/1/c":null,"/a/1/b":null,"/a/2/0/x~0~1/0":true,"/a/2/0/x~0~1/1":null,"/a/2/0/w":2})");
+    }
 }

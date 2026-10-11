@@ -18,37 +18,40 @@
 #ifndef INCLUDE_NLOHMANN_JSON_HPP_
 #define INCLUDE_NLOHMANN_JSON_HPP_
 
-// Workaround for GCC template redefinition errors in C++ modules
-// When nlohmann/json.hpp is included in a C++20 module preamble after
-// other module imports, GCC may report spurious redefinition errors for
-// STL templates. These pragmas suppress those false positives.
-// See: https://github.com/nlohmann/json/issues/5103
-#if defined(__GNUC__) && !defined(__clang__) && __cplusplus >= 202002L
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wignored-attributes"
-#endif
-
-#include <algorithm> // all_of, find, for_each
+#include <algorithm> // all_of, find, for_each, none_of
+#include <cmath> // isnan
 #include <cstddef> // nullptr_t, ptrdiff_t, size_t
+#include <cstdint> // uint8_t
 #include <functional> // hash, less
 #include <initializer_list> // initializer_list
 #ifndef JSON_NO_IO
     #include <iosfwd> // istream, ostream
 #endif  // JSON_NO_IO
-#include <iterator> // random_access_iterator_tag
+#include <iterator> // make_move_iterator, random_access_iterator_tag
+#include <limits> // numeric_limits
 #include <memory> // unique_ptr
+#include <set> // swap, operator!=
+#include <stdexcept> // length_error
 #include <string> // string, stoi, to_string
+#include <type_traits> // enable_if_t, is_same, is_scalar, ...
+#include <unordered_map> // swap (for the from_json(..., std::unordered_map&) overload)
 #include <utility> // declval, forward, move, pair, swap
 #include <vector> // vector
 
-#include <nlohmann/adl_serializer.hpp>
+// keep: json.hpp's own basic_json<> default template arguments need the complete definition of
+// each of these, not only the forward declarations from json_fwd.hpp, so IWYU's suggestion to
+// drop them (nothing in this file otherwise names the type) would break every downstream
+// translation unit that relies on basic_json<>'s defaults actually being usable.
+#include <nlohmann/adl_serializer.hpp> // IWYU pragma: keep
 #include <nlohmann/byte_container_with_subtype.hpp>
-#include <nlohmann/detail/conversions/from_json.hpp>
-#include <nlohmann/detail/conversions/to_json.hpp>
+#include <nlohmann/detail/abi_macros.hpp>
+#include <nlohmann/detail/conversions/from_json.hpp> // IWYU pragma: keep
+#include <nlohmann/detail/conversions/to_json.hpp> // IWYU pragma: keep
 #include <nlohmann/detail/exceptions.hpp>
 #include <nlohmann/detail/hash.hpp>
 #include <nlohmann/detail/input/binary_reader.hpp>
 #include <nlohmann/detail/input/input_adapters.hpp>
+#include <nlohmann/detail/input/json_sax.hpp>
 #include <nlohmann/detail/input/lexer.hpp>
 #include <nlohmann/detail/input/parser.hpp>
 #include <nlohmann/detail/iterators/internal_iterator.hpp>
@@ -60,6 +63,7 @@
 #include <nlohmann/detail/json_pointer.hpp>
 #include <nlohmann/detail/json_ref.hpp>
 #include <nlohmann/detail/macro_scope.hpp>
+#include <nlohmann/detail/meta/detected.hpp>
 #include <nlohmann/detail/string_concat.hpp>
 #include <nlohmann/detail/string_escape.hpp>
 #include <nlohmann/detail/string_utils.hpp>
@@ -68,9 +72,11 @@
 #include <nlohmann/detail/output/binary_writer.hpp>
 #include <nlohmann/detail/output/output_adapters.hpp>
 #include <nlohmann/detail/output/serializer.hpp>
+#include <nlohmann/detail/recursion_depth_limit.hpp>
 #include <nlohmann/detail/value_t.hpp>
 #include <nlohmann/json_fwd.hpp>
-#include <nlohmann/ordered_map.hpp>
+#include <nlohmann/ordered_map.hpp> // IWYU pragma: keep
+#include <nlohmann/thirdparty/hedley/hedley.hpp>
 
 #if defined(JSON_HAS_CPP_17)
     #if JSON_HAS_STATIC_RTTI
@@ -109,11 +115,12 @@ struct is_std_optional<std::optional<T>> : std::true_type {};
 @brief a class to store JSON values
 
 @internal
-@invariant The member variables @a m_value and @a m_type have the following
-relationship:
-- If `m_type == value_t::object`, then `m_value.object != nullptr`.
-- If `m_type == value_t::array`, then `m_value.array != nullptr`.
-- If `m_type == value_t::string`, then `m_value.string != nullptr`.
+@invariant The member variables @a m_data.m_value and @a m_data.m_type have
+the following relationship:
+- If `m_data.m_type == value_t::object`, then `m_data.m_value.object != nullptr`.
+- If `m_data.m_type == value_t::array`, then `m_data.m_value.array != nullptr`.
+- If `m_data.m_type == value_t::string`, then `m_data.m_value.string != nullptr`.
+- If `m_data.m_type == value_t::binary`, then `m_data.m_value.binary != nullptr`.
 The invariants are checked by member function assert_invariant().
 
 @note ObjectType trick from https://stackoverflow.com/a/9860911
@@ -140,7 +147,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     friend ::nlohmann::detail::serializer<basic_json>;
     template<typename BasicJsonType>
     friend class ::nlohmann::detail::iter_impl;
-    template<typename BasicJsonType, typename CharType>
+    template<typename BasicJsonType, typename CharType, typename OutputSinkType>
     friend class ::nlohmann::detail::binary_writer;
     template<typename BasicJsonType, typename InputType, typename SAX>
     friend class ::nlohmann::detail::binary_reader;
@@ -148,11 +155,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     friend class ::nlohmann::detail::json_sax_dom_parser;
     template<typename BasicJsonType, typename InputAdapterType>
     friend class ::nlohmann::detail::json_sax_dom_callback_parser;
+#if JSON_DIAGNOSTIC_POSITIONS
+    friend struct ::nlohmann::detail::diagnostic_positions;
+#endif
     friend class ::nlohmann::detail::exception;
 
     /// workaround type for MSVC
     using basic_json_t = NLOHMANN_BASIC_JSON_TPL;
-    using json_base_class_t = ::nlohmann::detail::json_base_class<CustomBaseClass>;
 
   JSON_PRIVATE_UNLESS_TESTED:
     // convenience aliases for types residing in namespace detail;
@@ -173,21 +182,24 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     }
 
   private:
-    using primitive_iterator_t = ::nlohmann::detail::primitive_iterator_t;
-    template<typename BasicJsonType>
-    using internal_iterator = ::nlohmann::detail::internal_iterator<BasicJsonType>;
     template<typename BasicJsonType>
     using iter_impl = ::nlohmann::detail::iter_impl<BasicJsonType>;
     template<typename Iterator>
     using iteration_proxy = ::nlohmann::detail::iteration_proxy<Iterator>;
     template<typename Base> using json_reverse_iterator = ::nlohmann::detail::json_reverse_iterator<Base>;
 
-    template<typename CharType>
-    using output_adapter_t = ::nlohmann::detail::output_adapter_t<CharType>;
-
     template<typename InputType>
     using binary_reader = ::nlohmann::detail::binary_reader<basic_json, InputType>;
     template<typename CharType> using binary_writer = ::nlohmann::detail::binary_writer<basic_json, CharType>;
+    // binary_writer over a concrete (non-virtual) sink appending into a std::vector,
+    // used by the vector-returning to_* overloads
+    template<typename CharType> using vector_binary_writer =
+        ::nlohmann::detail::binary_writer<basic_json, CharType, ::nlohmann::detail::output_vector_sink<CharType>>;
+    template<typename CharType> static vector_binary_writer<CharType> vector_writer(
+        std::vector<CharType>& v, const ::nlohmann::detail::error_handler_t error_handler = ::nlohmann::detail::binary_writer_default_error_handler())
+    {
+        return vector_binary_writer<CharType>(::nlohmann::detail::output_vector_sink<CharType>(v), error_handler);
+    }
 
   JSON_PRIVATE_UNLESS_TESTED:
     using serializer = ::nlohmann::detail::serializer<basic_json>;
@@ -204,12 +216,79 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     using cbor_tag_handler_t = detail::cbor_tag_handler_t;
     /// how to encode BJData
     using bjdata_version_t = detail::bjdata_version_t;
+    /// base class used to inject custom functionality into each instance of basic_json
+    /// @sa https://json.nlohmann.me/api/basic_json/json_base_class_t/
+    using json_base_class_t = ::nlohmann::detail::json_base_class<CustomBaseClass>;
     /// helper type for initializer lists of basic_json values
     using initializer_list_t = std::initializer_list<detail::json_ref<basic_json>>;
 
     using input_format_t = detail::input_format_t;
     /// SAX interface type, see @ref nlohmann::json_sax
     using json_sax_t = json_sax<basic_json>;
+
+    ////////////////////////////////////////////////////////////////////////////////
+    // utility templates to create a json type with different template parameters //
+    ////////////////////////////////////////////////////////////////////////////////
+
+    /// Json type using a different type for storing objects
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<template<typename, typename, typename...> class ObjectType2>
+    using with_object_t = basic_json<ObjectType2, ArrayType, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type for storing arrays
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<template<typename, typename...> class ArrayType2>
+    using with_array_t =  basic_json<ObjectType, ArrayType2, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type for storing strings
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<class StringType2>
+    using with_string_t =  basic_json<ObjectType, ArrayType, StringType2, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type for storing booleans
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<class BooleanType2>
+    using with_boolean_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType2,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using different types for storing signed and unsigned integers
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<class NumberIntegerType2, class NumberUnsignedType2>
+    using with_integers_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType,
+          NumberIntegerType2, NumberUnsignedType2, NumberFloatType, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type for storing floating point numbers
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<class NumberFloatType2>
+    using with_float_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType2, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type as base allocator
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<template<typename> class AllocatorType2>
+    using with_allocator_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType2, JSONSerializer, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type as json serializer
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<template<typename, typename = void> class JSONSerializer2>
+    using with_json_serializer_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer2, BinaryType, CustomBaseClass>;
+
+    /// Json type using a different type for storing binary data
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<class BinaryType2>
+    using with_binary_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer, BinaryType2, CustomBaseClass>;
+
+    /// Json type using a different type as base class
+    /// @sa https://json.nlohmann.me/api/basic_json/with_t/
+    template<class CustomBaseClass2>
+    using with_base_class_t =  basic_json<ObjectType, ArrayType, StringType, BooleanType,
+          NumberIntegerType, NumberUnsignedType, NumberFloatType, AllocatorType, JSONSerializer, BinaryType, CustomBaseClass2>;
 
     ////////////////
     // exceptions //
@@ -317,8 +396,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     std::to_string(__GNUC_PATCHLEVEL__))
             }
         };
-#elif defined(__HP_cc) || defined(__HP_aCC)
-        result["compiler"] = "hp"
+#elif defined(__HP_aCC)
+        result["compiler"] = {{"family", "hp"}, {"version", __HP_aCC}};
 #elif defined(__IBMCPP__)
         result["compiler"] = {{"family", "ilecpp"}, {"version", __IBMCPP__}};
 #elif defined(_MSC_VER)
@@ -460,9 +539,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     binary    | binary          | pointer to @ref binary_t
     null      | null            | *no value is stored*
 
-    @note Variable-length types (objects, arrays, and strings) are stored as
-    pointers. The size of the union should not exceed 64 bits if the default
-    value types are used.
+    @note Variable-length types (objects, arrays, strings, and binary
+    values) are stored as pointers. The size of the union should not exceed
+    64 bits if the default value types are used.
 
     @since version 1.0.0
     */
@@ -560,7 +639,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     object = nullptr;  // silence warning, see #821
                     if (JSON_HEDLEY_UNLIKELY(t == value_t::null))
                     {
-                        JSON_THROW(other_error::create(500, "961c151d2e87f2686a955a9be24d316f1362bf21 3.12.0", nullptr)); // LCOV_EXCL_LINE
+                        JSON_THROW(other_error::create(detail::exception_id::internal_error, "961c151d2e87f2686a955a9be24d316f1362bf21 3.12.0", nullptr)); // LCOV_EXCL_LINE
                     }
                     break;
                 }
@@ -597,100 +676,252 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         /// constructor for rvalue binary arrays (internal type)
         json_value(binary_t&& value) : binary(create<binary_t>(std::move(value))) {}
 
-        void destroy(value_t t)
+        /// constructors taking ownership of an already created value
+        explicit json_value(string_t* value) noexcept : string(value) {}
+        explicit json_value(object_t* value) noexcept : object(value) {}
+        explicit json_value(array_t* value) noexcept : array(value) {}
+
+private:
+        // raw, allocation-free transfer of m_data from src to dst: no
+        // set_parents()/assert_invariant() (the former is O(#children) per
+        // call under JSON_DIAGNOSTICS, which would make the walk below
+        // quadratic); dst takes ownership, src is left as value_t::null.
+        static void take(basic_json& dst, basic_json& src) noexcept
+        {
+            dst.m_data.m_type = src.m_data.m_type;
+            dst.m_data.m_value = src.m_data.m_value;
+            src.m_data.m_type = value_t::null;
+        }
+
+        // true if v is not an array/object, or is an already-empty one
+        static bool has_no_children(const basic_json& v) noexcept
+        {
+            switch (v.m_data.m_type)
+            {
+                case value_t::array:
+                    return v.m_data.m_value.array->empty();
+                case value_t::object:
+                    return v.m_data.m_value.object->empty();
+                case value_t::null:
+                case value_t::string:
+                case value_t::boolean:
+                case value_t::number_integer:
+                case value_t::number_unsigned:
+                case value_t::number_float:
+                case value_t::binary:
+                case value_t::discarded:
+                default:
+                    return true;
+            }
+        }
+
+        // The walk in destroy_container() may take the children of a
+        // container in any order, as long as it picks the same child again
+        // while that container is not modified in between. Arrays and
+        // objects with bidirectional iterators (std::map, ordered_map, ...)
+        // use their last child, which a vector-based container can remove
+        // in O(1). ObjectType only needs forward iterators, though (e.g.
+        // std::unordered_map), so other objects use their first child.
+        template<typename ObjectType_>
+        static typename ObjectType_::iterator walk_child_it(ObjectType_& o, std::bidirectional_iterator_tag /*unused*/)
+        {
+            return std::prev(o.end());
+        }
+
+        template<typename ObjectType_>
+        static typename ObjectType_::iterator walk_child_it(ObjectType_& o, std::forward_iterator_tag /*unused*/)
+        {
+            return o.begin();
+        }
+
+        template<typename ObjectType_>
+        static typename ObjectType_::iterator walk_child_it(ObjectType_& o)
+        {
+            JSON_ASSERT(!o.empty());
+            return walk_child_it(o, typename std::iterator_traits<typename ObjectType_::iterator>::iterator_category());
+        }
+
+        // the child of a non-empty array/object v that the walk in
+        // destroy_container() continues with (see walk_child_it() above)
+        static basic_json& walk_child(basic_json& v)
+        {
+            if (v.m_data.m_type == value_t::array)
+            {
+                return v.m_data.m_value.array->back();
+            }
+            JSON_ASSERT(v.m_data.m_type == value_t::object);
+            return walk_child_it(*v.m_data.m_value.object)->second;
+        }
+
+        // removes walk_child(v) from a non-empty array/object v; this never
+        // allocates, and since it is only ever called when that child is a
+        // scalar or an already-empty array/object, destroying it never
+        // recurses more than one level deep (see destroy() below)
+        static void pop_walk_child(basic_json& v)
+        {
+            if (v.m_data.m_type == value_t::array)
+            {
+                v.m_data.m_value.array->pop_back();
+            }
+            else
+            {
+                JSON_ASSERT(v.m_data.m_type == value_t::object);
+                v.m_data.m_value.object->erase(walk_child_it(*v.m_data.m_value.object));
+            }
+        }
+
+        // deallocates the (already empty) array/object held by v; this is
+        // the same allocator-based free the old recursive implementation
+        // used, just factored out so every level of the walk in destroy()
+        // can share it
+        static void free_container(basic_json& v) noexcept
+        {
+            if (v.m_data.m_type == value_t::array)
+            {
+                JSON_ASSERT(v.m_data.m_value.array->empty());
+                AllocatorType<array_t> alloc;
+                std::allocator_traits<decltype(alloc)>::destroy(alloc, v.m_data.m_value.array);
+                std::allocator_traits<decltype(alloc)>::deallocate(alloc, v.m_data.m_value.array, 1);
+            }
+            else
+            {
+                JSON_ASSERT(v.m_data.m_type == value_t::object);
+                JSON_ASSERT(v.m_data.m_value.object->empty());
+                AllocatorType<object_t> alloc;
+                std::allocator_traits<decltype(alloc)>::destroy(alloc, v.m_data.m_value.object);
+                std::allocator_traits<decltype(alloc)>::deallocate(alloc, v.m_data.m_value.object, 1);
+            }
+            v.m_data.m_type = value_t::null; // avoid a double free if v is later destructed
+        }
+
+public:
+        void destroy_string() noexcept
+        {
+            if (string == nullptr)
+            {
+                // not initialized (e.g., due to exception in the ctor)
+                return;
+            }
+            AllocatorType<string_t> alloc;
+            std::allocator_traits<decltype(alloc)>::destroy(alloc, string);
+            std::allocator_traits<decltype(alloc)>::deallocate(alloc, string, 1);
+        }
+
+        void destroy_binary() noexcept
+        {
+            if (binary == nullptr)
+            {
+                // not initialized (e.g., due to exception in the ctor)
+                return;
+            }
+            AllocatorType<binary_t> alloc;
+            std::allocator_traits<decltype(alloc)>::destroy(alloc, binary);
+            std::allocator_traits<decltype(alloc)>::deallocate(alloc, binary, 1);
+        }
+
+        // t must be value_t::array or value_t::object
+        void destroy_container(value_t t) noexcept
         {
             if (
                 (t == value_t::object && object == nullptr) ||
-                (t == value_t::array && array == nullptr) ||
-                (t == value_t::string && string == nullptr) ||
-                (t == value_t::binary && binary == nullptr)
+                (t == value_t::array && array == nullptr)
             )
             {
                 // not initialized (e.g., due to exception in the ctor)
                 return;
             }
-            if (t == value_t::array || t == value_t::object)
+
+            // Destroy the tree without recursing per nesting level and
+            // without any heap allocation: a heap-allocated flattening
+            // stack (the previous implementation) can itself throw
+            // bad_alloc, which would escape this noexcept destructor and
+            // terminate the program (#5135).
+            //
+            // Instead, walk down a chain of children (always the one
+            // walk_child() picks), reversing links as we go: cur is the
+            // container currently being emptied, and prev is its parent
+            // (value_t::null when there is none). Each parent's
+            // walk_child() slot doubles as storage for that parent's own
+            // parent link while we are below it, so no extra memory is
+            // needed; the parent is not modified meanwhile, so
+            // walk_child() finds that same slot again on the way up. We
+            // only ever remove a child once it is a scalar or an empty
+            // array/object, which neither allocates nor recurses more
+            // than one level deep.
+            //
+            // This json_value is not itself a basic_json, so the
+            // top-level container is first moved into a local stand-in
+            // ("cur"); a default-constructed basic_json has a null
+            // pointer in its m_value (see data::m_value's initializer),
+            // so swapping it with *this leaves this union's own pointer
+            // null, and it is never looked at or freed a second time.
+            basic_json cur;
+            cur.m_data.m_type = t;
+            using std::swap;
+            swap(cur.m_data.m_value, *this);
+
+            basic_json prev; // value_t::null: no parent
+
+            while (true)
             {
-                // flatten the current json_value to a heap-allocated stack
-                std::vector<basic_json> stack;
-
-                // move the top-level items to stack
-                if (t == value_t::array)
+                if (has_no_children(cur))
                 {
-                    stack.reserve(array->size());
-                    std::move(array->begin(), array->end(), std::back_inserter(stack));
-                }
-                else
-                {
-                    stack.reserve(object->size());
-                    for (auto&& it : *object)
+                    if (prev.m_data.m_type == value_t::null)
                     {
-                        stack.push_back(std::move(it.second));
-                    }
-                }
-
-                while (!stack.empty())
-                {
-                    // move the last item to a local variable to be processed
-                    basic_json current_item(std::move(stack.back()));
-                    stack.pop_back();
-
-                    // if current_item is array/object, move
-                    // its children to the stack to be processed later
-                    if (current_item.is_array())
-                    {
-                        std::move(current_item.m_data.m_value.array->begin(), current_item.m_data.m_value.array->end(), std::back_inserter(stack));
-
-                        current_item.m_data.m_value.array->clear();
-                    }
-                    else if (current_item.is_object())
-                    {
-                        for (auto&& it : *current_item.m_data.m_value.object)
-                        {
-                            stack.push_back(std::move(it.second));
-                        }
-
-                        current_item.m_data.m_value.object->clear();
+                        free_container(cur);
+                        return; // back at the top with nothing left to do
                     }
 
-                    // it's now safe that current_item gets destructed
-                    // since it doesn't have any children
+                    // ascend: detach the grandparent link from prev's
+                    // walk_child() slot, drop that (now null) slot, free cur
+                    // (it is empty), then move up one level
+                    basic_json gp;
+                    take(gp, walk_child(prev));
+                    pop_walk_child(prev);
+
+                    free_container(cur);
+
+                    take(cur, prev);
+                    take(prev, gp);
+                    continue;
                 }
+
+                basic_json& cur_child_ref = walk_child(cur);
+
+                if (has_no_children(cur_child_ref))
+                {
+                    // scalar, or already-empty array/object
+                    pop_walk_child(cur);
+                    continue;
+                }
+
+                // descend into the non-empty child, reversing the
+                // link: its slot takes over prev, and the child becomes
+                // the new cur
+                basic_json tmp;
+                take(tmp, cur_child_ref);
+                take(cur_child_ref, prev);
+                take(prev, cur);
+                take(cur, tmp);
             }
+        }
 
+        void destroy(value_t t)
+        {
             switch (t)
             {
-                case value_t::object:
-                {
-                    AllocatorType<object_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, object);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, object, 1);
-                    break;
-                }
-
-                case value_t::array:
-                {
-                    AllocatorType<array_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, array);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, array, 1);
-                    break;
-                }
-
                 case value_t::string:
-                {
-                    AllocatorType<string_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, string);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, string, 1);
+                    destroy_string();
                     break;
-                }
 
                 case value_t::binary:
-                {
-                    AllocatorType<binary_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, binary);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, binary, 1);
+                    destroy_binary();
                     break;
-                }
+
+                case value_t::object:
+                case value_t::array:
+                    destroy_container(t);
+                    break;
 
                 case value_t::null:
                 case value_t::boolean:
@@ -699,9 +930,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 case value_t::number_float:
                 case value_t::discarded:
                 default:
-                {
                     break;
-                }
             }
         }
     };
@@ -714,7 +943,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     end of every constructor to make sure that created objects respect the
     invariant. Furthermore, it has to be called each time the type of a JSON
     value is changed, because the invariant expresses a relationship between
-    @a m_type and @a m_value.
+    @a m_data.m_type and @a m_data.m_value.
 
     Furthermore, the parent relation is checked for arrays and objects: If
     @a check_parents true and the value is an array or object, then the
@@ -735,7 +964,6 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 #if JSON_DIAGNOSTICS
         JSON_TRY
         {
-            // cppcheck-suppress assertWithSideEffect
             JSON_ASSERT(!check_parents || !is_structured() || std::all_of(begin(), end(), [this](const basic_json & j)
             {
                 return j.m_parent == this;
@@ -783,6 +1011,18 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 #endif
     }
 
+    /// @brief replace the stored value with an already created one
+    /// The new value must be created before calling this function: if its
+    /// creation throws, the current value is left untouched.
+    void replace_value(value_t t, const json_value& v) noexcept
+    {
+        m_data.m_value.destroy(m_data.m_type);
+        m_data.m_value = v;
+        m_data.m_type = t;
+        set_parents();
+        assert_invariant();
+    }
+
     iterator set_parents(iterator it, std::ptrdiff_t count_set_parents)
     {
 #if JSON_DIAGNOSTICS
@@ -795,6 +1035,24 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 #endif
         return it;
     }
+
+    /// @brief the key to look up an object member with: the key itself, or its
+    ///        std::string_view if the object can only be searched with that
+    template < typename KeyType, detail::enable_if_t <
+                   !detail::is_string_view_convertible_key_type<basic_json_t, KeyType>::value, int > = 0 >
+    static KeyType && lookup_key(KeyType && key) noexcept
+    {
+        return std::forward<KeyType>(key);
+    }
+
+#ifdef JSON_HAS_CPP_17
+    template < typename KeyType, detail::enable_if_t <
+                   detail::is_string_view_convertible_key_type<basic_json_t, KeyType>::value, int > = 0 >
+    static std::string_view lookup_key(KeyType && key)
+    {
+        return std::forward<KeyType>(key);
+    }
+#endif
 
     /// @brief erase an element from the object and return the following one
     /// Not every map returns an iterator from erase(iterator): some containers
@@ -888,6 +1146,1011 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         return j;
     }
 
+#ifndef JSON_NO_THREAD_LOCAL
+    // nesting_depth() is a byte and may exceed the limit by one level
+    static_assert(detail::recursion_depth_limit() < 255, "the nesting depth count must fit in a byte");
+
+    /*!
+    @brief how many levels the operation going on in this thread has descended into
+
+    Copying a value, converting one from another specialization, and comparing
+    two values share this count. The library never nests one of them inside
+    another - none of them does either of the other two on the way - and where
+    user code nests them anyway, sharing the count only ends a descent sooner
+    than it had to, which costs a little speed and is never wrong.
+
+    A byte is enough: the count never exceeds the limit by more than the single
+    level that notices the limit has been reached.
+    */
+    static std::uint8_t& nesting_depth() noexcept
+    {
+        static thread_local std::uint8_t depth = 0; // NOLINT(misc-use-internal-linkage)
+        return depth;
+    }
+#endif
+
+    /*!
+    @brief whether a descent must stop here and finish without the call stack
+
+    @a may_descend says whether the operator descends at all; it is a constant
+    at every call site, and is passed rather than tested by the caller so that
+    the test does not become a constant condition there, which MSVC reports as
+    C4127.
+
+    The comparison operators use this rather than @ref nesting_depth_guard::okay,
+    because they are written as a macro and a macro cannot use the preprocessor
+    the way the guard's constructor does; @ref copy_structured, which can, asks
+    the guard instead and never calls this.
+    */
+    static bool nesting_depth_exhausted(bool may_descend = true) noexcept
+    {
+#ifdef JSON_NO_THREAD_LOCAL
+        // without a count of its own per thread, a descent cannot be bounded
+        // without racing another one, so none is made
+        static_cast<void>(may_descend);
+        return true;
+#else
+        return !may_descend || nesting_depth() >= detail::recursion_depth_limit();
+#endif
+    }
+
+    /*!
+    @brief counts one level of a bounded descent for as long as it runs, and
+           reports whether the descent was still within the limit when it began
+
+    Looks the count up and tests it against the limit itself, rather than
+    leaving that to the caller: either way it is reached exactly once, so
+    there is nothing to be gained by making the caller do it.
+
+    Does nothing and is never @ref okay without thread-local storage, where no
+    descent can be bounded at all: a caller that only descends while this says
+    it may always ends up finishing without the call stack, exactly as if every
+    value were nested past the limit.
+    */
+    class nesting_depth_guard
+    {
+      public:
+        nesting_depth_guard() noexcept
+#ifdef JSON_NO_THREAD_LOCAL
+            : m_okay(false)
+#else
+            : m_okay(nesting_depth() < detail::recursion_depth_limit())
+#endif
+        {
+#ifndef JSON_NO_THREAD_LOCAL
+            ++nesting_depth();
+#endif
+        }
+
+        ~nesting_depth_guard()
+        {
+#ifndef JSON_NO_THREAD_LOCAL
+            --nesting_depth();
+#endif
+        }
+
+        nesting_depth_guard(const nesting_depth_guard&) = delete;
+        nesting_depth_guard& operator=(const nesting_depth_guard&) = delete;
+        nesting_depth_guard(nesting_depth_guard&&) = delete;
+        nesting_depth_guard& operator=(nesting_depth_guard&&) = delete;
+
+        bool okay() const noexcept
+        {
+            return m_okay;
+        }
+
+      private:
+        bool m_okay;
+    };
+
+    /// an entry of the iterative deep copy's worklist: a structured value and
+    /// the value that is to become its copy
+    using copy_worklist_t = std::vector<std::pair<const basic_json*, basic_json*>>;
+
+    /// scratch space to build the key skeleton of an object copy in one go
+    using copy_scratch_value_t = std::pair<typename object_t::key_type, basic_json>;
+    using copy_scratch_t = std::vector<copy_scratch_value_t, AllocatorType<copy_scratch_value_t>>;
+
+    /// @brief tag selecting the constructor below; used only to build the
+    /// elements of a deep copy (@ref copy_array_level, @ref copy_object_level)
+    struct copy_construct_tag {};
+
+  public:
+    /*!
+    @brief construct a null value whose base class - and, with @ref
+           JSON_DIAGNOSTIC_POSITIONS, positions - are copied from @a src
+
+    Copy-constructing @ref json_base_class_t here, rather than default-
+    constructing the element and assigning its base class afterwards, means
+    that copying a @ref basic_json only ever requires a copy-constructible
+    base class, and never a move-assignable one as well.
+
+    @note this constructor has to be public: @ref copy_array_level and
+          @ref copy_object_level reach it through @ref array_t's or @ref
+          object_t's own emplace_back(), which constructs the element from
+          outside @ref basic_json and so cannot call a private constructor.
+          @ref copy_construct_tag is private, though, and nothing in the
+          public interface hands out a value of it, so outside code can still
+          never name it to call this constructor itself.
+    */
+    basic_json(copy_construct_tag /*unused*/, const basic_json& src)
+    noexcept(std::is_nothrow_copy_constructible<json_base_class_t>::value)
+        : json_base_class_t(src)
+#if JSON_DIAGNOSTIC_POSITIONS
+        , start_position(src.start_position)
+        , end_position(src.end_position)
+#endif
+    {
+    }
+
+  private:
+
+    /*!
+    @brief copy the value of @a src into @a dst, which must not be structured
+
+    Objects and arrays are left alone: creating those is the one thing the copy
+    constructor and @ref copy_shallow do differently from one another, and it is
+    the reason copying a value can descend at all.
+    */
+    /// @note inlined on purpose: both callers have already told an object or an
+    ///       array apart from the rest, and letting the compiler fold that test
+    ///       into this switch is worth a few percent when copying a value made
+    ///       mostly of numbers
+    JSON_HEDLEY_ALWAYS_INLINE
+    static void copy_leaf_value(const basic_json& src, basic_json& dst)
+    {
+        switch (src.m_data.m_type)
+        {
+            case value_t::string:
+            {
+                dst.m_data.m_value = *src.m_data.m_value.string;
+                break;
+            }
+
+            case value_t::binary:
+            {
+                dst.m_data.m_value = *src.m_data.m_value.binary;
+                break;
+            }
+
+            case value_t::boolean:
+            {
+                dst.m_data.m_value = src.m_data.m_value.boolean;
+                break;
+            }
+
+            case value_t::number_integer:
+            {
+                dst.m_data.m_value = src.m_data.m_value.number_integer;
+                break;
+            }
+
+            case value_t::number_unsigned:
+            {
+                dst.m_data.m_value = src.m_data.m_value.number_unsigned;
+                break;
+            }
+
+            case value_t::number_float:
+            {
+                dst.m_data.m_value = src.m_data.m_value.number_float;
+                break;
+            }
+
+            case value_t::object:
+            case value_t::array:
+            case value_t::null:
+            case value_t::discarded:
+            default:
+                break;
+        }
+    }
+
+    /*!
+    @brief finish the copy @a dst of @a src that a @ref copy_construct_tag
+           constructor started, other than the children of an object or array
+
+    @a dst already has @a src's base class and, with @ref
+    JSON_DIAGNOSTIC_POSITIONS, positions; only its value is still missing.
+    Objects and arrays are not copied here; they are appended to @a worklist to
+    be created later by @ref copy_iteratively. Until that happens, @a dst remains
+    a null value, so that a partially built copy can be destroyed at any point
+    without ever violating the class invariants.
+    */
+    static void copy_shallow(const basic_json& src, basic_json& dst, copy_worklist_t& worklist)
+    {
+        if (src.m_data.m_type == value_t::object || src.m_data.m_type == value_t::array)
+        {
+            // defer: dst stays a null value until its container exists
+            worklist.emplace_back(&src, &dst);
+            return;
+        }
+
+        copy_leaf_value(src, dst);
+
+        // only now that the value exists may the type be set: had the creation
+        // of the value thrown, dst would have been left as a valid null value
+        dst.m_data.m_type = src.m_data.m_type;
+    }
+
+    /// @brief create the copy of the array @a src in @a dst
+    /// @note structured elements are appended to @a worklist instead
+    static void copy_array_level(const basic_json& src, basic_json& dst, copy_worklist_t& worklist)
+    {
+        const array_t& src_array = *src.m_data.m_value.array;
+
+        dst.m_data.m_value.array = create<array_t>();
+        // only now that the array exists may dst stop being a null value
+        dst.m_data.m_type = value_t::array;
+
+        // create every element - its base class already copy-constructed from
+        // its counterpart in src, via the copy_construct_tag constructor -
+        // before any of their addresses are handed to worklist below: growing
+        // the array while that is going on could reallocate it and invalidate
+        // addresses taken from an earlier iteration
+        for (const auto& src_element : src_array)
+        {
+            dst.m_data.m_value.array->emplace_back(copy_construct_tag{}, src_element);
+        }
+
+        auto dst_it = dst.m_data.m_value.array->begin();
+        for (auto src_it = src_array.cbegin(); src_it != src_array.cend(); ++src_it, ++dst_it)
+        {
+            copy_shallow(*src_it, *dst_it, worklist);
+        }
+    }
+
+    /// @brief create the object type from a range, preserving @a src_object's
+    /// comparator when the object type supports it
+    /// Enabled for object types that provide a key_comp() and a matching
+    /// range-plus-comparator constructor, such as std::map. Other object
+    /// types, such as nlohmann::ordered_map, fall back to the plain range
+    /// constructor and default-construct their comparator, just as they
+    /// always have (@ref detail::is_comparator_constructible_object_type).
+    template<typename Iterator, detail::enable_if_t<
+                 detail::is_comparator_constructible_object_type<object_t, Iterator>::value, int> = 0>
+    static object_t* create_object_with_comparator(const object_t& src_object, Iterator first, Iterator last)
+    {
+        return create<object_t>(first, last, src_object.key_comp());
+    }
+
+    template<typename Iterator, detail::enable_if_t<
+                 detail::negation<detail::is_comparator_constructible_object_type<object_t, Iterator>>::value, int> = 0>
+    static object_t* create_object_with_comparator(const object_t& /*src_object*/, Iterator first, Iterator last)
+    {
+        return create<object_t>(first, last);
+    }
+
+    /// @brief compare two object keys for equality, if the key type supports it
+    /// @note object_t only needs operator< for its keys (std::map), so operator==
+    ///       may not exist; the keys are then reported as different, which makes
+    ///       copy_object_level pair the values via object_t::find()
+    template<typename K = typename object_t::key_type,
+             detail::enable_if_t<detail::is_detected<detail::detect_equal_comparable, K>::value, int> = 0>
+    static bool copy_keys_equal(const K& a, const K& b)
+    {
+        return a == b;
+    }
+
+    template < typename K = typename object_t::key_type,
+               detail::enable_if_t < !detail::is_detected<detail::detect_equal_comparable, K>::value, int > = 0 >
+    static bool copy_keys_equal(const K& /*a*/, const K& /*b*/)
+    {
+        return false;
+    }
+
+    /// @brief create the copy of the object @a src in @a dst
+    /// @note structured values are appended to @a worklist instead
+    static void copy_object_level(const basic_json& src, basic_json& dst,
+                                  copy_worklist_t& worklist, copy_scratch_t& scratch)
+    {
+        const object_t& src_object = *src.m_data.m_value.object;
+
+        // build the complete key skeleton and hand it to the object's range
+        // constructor: adding the keys one by one would be quadratic for object
+        // types that are backed by a vector, such as nlohmann::ordered_map; each
+        // value's base class is already copy-constructed from its counterpart
+        // in src, via the copy_construct_tag constructor
+        scratch.clear();
+        scratch.reserve(src_object.size());
+        for (const auto& element : src_object)
+        {
+            scratch.emplace_back(element.first, basic_json(copy_construct_tag{}, element.second));
+        }
+
+        dst.m_data.m_value.object = create_object_with_comparator(src_object,
+                                    std::make_move_iterator(scratch.begin()),
+                                    std::make_move_iterator(scratch.end()));
+        // only now that the object exists may dst stop being a null value
+        dst.m_data.m_type = value_t::object;
+        scratch.clear();
+
+        // pair every value of the copy with its counterpart in the original;
+        // both are enumerated in the same order for every object type with a
+        // deterministic order, so the lookup is only needed for exotic ones
+        auto src_it = src_object.cbegin();
+        for (auto& element : *dst.m_data.m_value.object)
+        {
+            if (JSON_HEDLEY_LIKELY(src_it != src_object.cend() && copy_keys_equal(src_it->first, element.first)))
+            {
+                copy_shallow(src_it->second, element.second, worklist);
+                ++src_it;
+            }
+            else
+            {
+                const auto found = src_object.find(element.first);
+                JSON_ASSERT(found != src_object.cend());
+                copy_shallow(found->second, element.second, worklist);
+            }
+        }
+    }
+
+    /*!
+    @brief deep-copy the object or array @a src into this value without recursing
+
+    The values whose copy has not been created yet are kept on an explicit
+    worklist rather than on the call stack. This is only reached for values
+    nested deeper than @ref detail::recursion_depth_limit levels, which is why it copies
+    every container by hand instead of letting the container do it: the fast
+    ways of doing so would descend into the elements and defeat the purpose.
+    */
+    void copy_iteratively(const basic_json& src)
+    {
+        copy_worklist_t worklist;
+        copy_scratch_t scratch;
+
+        const basic_json* src_value = &src;
+        basic_json* dst_value = this;
+
+        for (;;)
+        {
+            if (src_value->m_data.m_type == value_t::array)
+            {
+                copy_array_level(*src_value, *dst_value, worklist);
+            }
+            else
+            {
+                copy_object_level(*src_value, *dst_value, worklist, scratch);
+            }
+
+            // the container is complete and will not be modified again
+            dst_value->set_parents();
+
+            if (worklist.empty())
+            {
+                break;
+            }
+
+            const auto& next = worklist.back();
+            src_value = next.first;
+            dst_value = next.second;
+            worklist.pop_back();
+        }
+    }
+
+    /*!
+    @brief copy one level of the object or array @a src into this value
+
+    The container copies its own elements, which is the fastest way to fill it.
+    Every element that is structured itself comes back to @ref copy_structured.
+    */
+    void copy_level(const basic_json& src)
+    {
+        if (m_data.m_type == value_t::object)
+        {
+            m_data.m_value = *src.m_data.m_value.object;
+        }
+        else
+        {
+            m_data.m_value = *src.m_data.m_value.array;
+        }
+
+        set_parents();
+    }
+
+    /*!
+    @brief deep-copy the object or array @a src into this value
+
+    Copying a container copies its elements, so a value nested deeply enough
+    used to exhaust the call stack. The descent is bounded here: the first
+    @ref detail::recursion_depth_limit levels are copied by the containers themselves, just
+    as they always were, and anything below that is copied without the call
+    stack by @ref copy_iteratively. Copying a value can therefore no longer
+    exhaust the stack, however deeply it is nested, just like destroying one
+    cannot since #1436.
+
+    Nothing has to be scanned or built by hand to reach that: a value that is
+    not nested deeper than the limit - all but a vanishing minority - is copied
+    exactly as it was before, and this whole detour costs it one counter.
+
+    @sa https://github.com/nlohmann/json/issues/5387
+    */
+    void copy_structured(const basic_json& src)
+    {
+        const nesting_depth_guard guard;
+
+        if (JSON_HEDLEY_LIKELY(guard.okay()))
+        {
+            copy_level(src);
+            return;
+        }
+
+        // Finish this value without descending any further. It is completed
+        // before this returns, so a copy made by a custom base class - or by
+        // anything else that runs while a copy is going on - is unaffected by
+        // the copy it is nested in.
+        copy_iteratively(src);
+    }
+
+    /*!
+    @brief convert the value @a val of another specialization into this null
+           value; @a val must be neither an object nor an array
+
+    Converting such a value never descends, so both ways of converting an
+    object or an array (@ref convert_structured) leave their elements of this
+    kind to the converting constructor, which leaves them to this.
+    */
+    template<typename BasicJsonType>
+    void convert_leaf(const BasicJsonType& val)
+    {
+        using other_boolean_t = typename BasicJsonType::boolean_t;
+        using other_number_float_t = typename BasicJsonType::number_float_t;
+        using other_number_integer_t = typename BasicJsonType::number_integer_t;
+        using other_number_unsigned_t = typename BasicJsonType::number_unsigned_t;
+        using other_string_t = typename BasicJsonType::string_t;
+        using other_binary_t = typename BasicJsonType::binary_t;
+
+        switch (val.type())
+        {
+            case value_t::boolean:
+                JSONSerializer<other_boolean_t>::to_json(*this, val.template get<other_boolean_t>());
+                break;
+            case value_t::number_float:
+                JSONSerializer<other_number_float_t>::to_json(*this, val.template get<other_number_float_t>());
+                break;
+            case value_t::number_integer:
+                JSONSerializer<other_number_integer_t>::to_json(*this, val.template get<other_number_integer_t>());
+                break;
+            case value_t::number_unsigned:
+                JSONSerializer<other_number_unsigned_t>::to_json(*this, val.template get<other_number_unsigned_t>());
+                break;
+            case value_t::string:
+                JSONSerializer<other_string_t>::to_json(*this, val.template get_ref<const other_string_t&>());
+                break;
+            case value_t::binary:
+                JSONSerializer<other_binary_t>::to_json(*this, val.template get_ref<const other_binary_t&>());
+                break;
+            case value_t::null:
+                // m_data.m_type is already value_t::null
+                break;
+            case value_t::discarded:
+                m_data.m_type = value_t::discarded;
+                break;
+            case value_t::object: // LCOV_EXCL_LINE
+            case value_t::array:  // LCOV_EXCL_LINE
+            default:              // LCOV_EXCL_LINE
+                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
+        }
+    }
+
+    /// scratch space for the converted elements of the arrays that
+    /// @ref convert_iteratively has yet to create
+    using convert_scratch_t = std::vector<basic_json, AllocatorType<basic_json>>;
+
+    /*!
+    @brief create the object or array @a val converted into this null value
+
+    Its converted elements are the last `val.size()` entries of @a elements (an
+    array) or of @a members (an object); they are moved into the container in
+    one go and then removed.
+    */
+    template<typename BasicJsonType>
+    void convert_level(const BasicJsonType& val, convert_scratch_t& elements, copy_scratch_t& members)
+    {
+        if (val.is_object())
+        {
+            const auto first = members.end() - static_cast<typename copy_scratch_t::difference_type>(val.size());
+            m_data.m_value.object = create<object_t>(std::make_move_iterator(first),
+                                    std::make_move_iterator(members.end()));
+            // only now that the object exists may this stop being a null value
+            m_data.m_type = value_t::object;
+            members.erase(first, members.end());
+        }
+        else
+        {
+            const auto first = elements.end() - static_cast<typename convert_scratch_t::difference_type>(val.size());
+            m_data.m_value.array = create<array_t>(std::make_move_iterator(first),
+                                                   std::make_move_iterator(elements.end()));
+            // only now that the array exists may this stop being a null value
+            m_data.m_type = value_t::array;
+            elements.erase(first, elements.end());
+        }
+
+        set_parents();
+    }
+
+    /*!
+    @brief convert the object or array @a val of another specialization into
+           this null value without recursing
+
+    The containers whose conversion has begun are kept on an explicit stack
+    rather than on the call stack. Unlike @ref copy_iteratively, this builds
+    every container from the bottom up: all its elements are converted first,
+    and the container is then created from them in one go, the way the range
+    constructor that converts the levels above the bound does. The two object
+    types need not enumerate their members in the same order, so the members
+    could not be paired up by position anyway, and building from a range keeps
+    what the range constructor does with keys that become equal on conversion.
+
+    Every value is complete before it is handed on, and a container gets its
+    type only once it exists, so whatever throws, every value left behind can
+    be destroyed.
+    */
+    template<typename BasicJsonType>
+    void convert_iteratively(const BasicJsonType& val, std::true_type /*unused*/)
+    {
+        using other_const_iterator = typename BasicJsonType::const_iterator;
+
+        // the containers whose conversion has begun, innermost last, each with
+        // its element to convert next
+        std::vector<std::pair<const BasicJsonType*, other_const_iterator>> pending;
+
+        // the converted elements of the pending arrays and the converted
+        // members of the pending objects, those of the innermost one last
+        convert_scratch_t elements;
+        copy_scratch_t members;
+
+        pending.emplace_back(&val, val.cbegin());
+
+        for (;;)
+        {
+            const BasicJsonType& container = *pending.back().first;
+            // a copy, as descending below can reallocate pending; the
+            // iterator kept in pending is only advanced through pending.back()
+            const other_const_iterator next = pending.back().second;
+
+            if (next != container.cend())
+            {
+                if (next->is_structured())
+                {
+                    // convert its elements first; next stays where it is until
+                    // the converted container is handed back to this one
+                    pending.emplace_back(&*next, next->cbegin());
+                    continue;
+                }
+
+                // the converting constructor does not descend into this value
+                if (container.is_object())
+                {
+                    members.emplace_back(next.key(), *next);
+                }
+                else
+                {
+                    elements.emplace_back(*next);
+                }
+                ++pending.back().second;
+                continue;
+            }
+
+            // all elements of the container are converted: create it
+            pending.pop_back();
+
+            if (pending.empty())
+            {
+                convert_level(container, elements, members);
+                return;
+            }
+
+            basic_json converted;
+            converted.convert_level(container, elements, members);
+#if JSON_DIAGNOSTIC_POSITIONS
+            converted.start_position = container.start_pos();
+            converted.end_position = container.end_pos();
+#endif
+
+            // hand it to the container it is an element of
+            if (pending.back().first->is_object())
+            {
+                members.emplace_back(pending.back().second.key(), std::move(converted));
+            }
+            else
+            {
+                elements.push_back(std::move(converted));
+            }
+            ++pending.back().second;
+        }
+    }
+
+    /*!
+    @brief convert the object or array @a val of another specialization into
+           this null value
+
+    Converting a container converts its elements, so a value nested deeply
+    enough used to exhaust the call stack. The descent is bounded here as in
+    @ref copy_structured: the first `detail::recursion_depth_limit()` levels
+    are converted by the containers' range constructors, just as they always were,
+    and anything below that is converted without the call stack by
+    @ref convert_iteratively.
+
+    @sa https://github.com/nlohmann/json/issues/5650
+    */
+    template<typename BasicJsonType>
+    void convert_structured(const BasicJsonType& val)
+    {
+        const nesting_depth_guard guard;
+
+        if (JSON_HEDLEY_LIKELY(guard.okay()))
+        {
+            convert_by_serializers(val);
+            return;
+        }
+
+        // the iterative conversion needs to construct this object type's keys
+        // from those of @a val; if it cannot, neither can the range constructor,
+        // and the serializers convert @a val some other way (see #3425)
+        convert_iteratively(val, std::is_constructible<typename object_t::key_type, const typename BasicJsonType::string_t&> {});
+    }
+
+    /// @brief convert the object or array @a val with the serializers; every
+    /// element comes back to the converting constructor
+    template<typename BasicJsonType>
+    void convert_by_serializers(const BasicJsonType& val)
+    {
+        if (val.is_object())
+        {
+            using other_object_t = typename BasicJsonType::object_t;
+            JSONSerializer<other_object_t>::to_json(*this, val.template get_ref<const other_object_t&>());
+        }
+        else
+        {
+            using other_array_t = typename BasicJsonType::array_t;
+            JSONSerializer<other_array_t>::to_json(*this, val.template get_ref<const other_array_t&>());
+        }
+    }
+
+    /// @brief convert @a val whose keys cannot be converted, see @ref convert_structured
+    template<typename BasicJsonType>
+    void convert_iteratively(const BasicJsonType& val, std::false_type /*unused*/)
+    {
+        convert_by_serializers(val);
+    }
+
+
+    /// the result of comparing two values, including values that cannot be
+    /// ordered at all, such as a discarded value or a NaN
+    enum class compare_result { less, equal, greater, unordered };
+
+#if JSON_HAS_THREE_WAY_COMPARISON
+    /// @brief the ordering that @a result stands for
+    static std::partial_ordering to_partial_ordering(compare_result result) noexcept // *NOPAD*
+    {
+        switch (result)
+        {
+            case compare_result::less:
+                return std::partial_ordering::less;
+            case compare_result::greater:
+                return std::partial_ordering::greater;
+            case compare_result::equal:
+                return std::partial_ordering::equivalent;
+            case compare_result::unordered:
+            default:
+                return std::partial_ordering::unordered;
+        }
+    }
+#endif
+
+    /*!
+    @brief compare two values that are not both an array or both an object
+
+    Such a pair is compared by the operators themselves, which cannot descend
+    into it and therefore cannot recurse.
+
+    That holds for a pair whose types differ as much as for a pair of leaves: an
+    array and an object are told apart by their types alone, because an operator
+    only ever descends into two values of the same type. So `==` reports them as
+    unequal without looking inside either, and an ordering falls back to the
+    order of the types - an object sorts before an array - exactly as it does
+    for a value that is not nested deeply enough to get here.
+    */
+    template<bool Ordered>
+    static compare_result compare_leaves(const_reference lhs, const_reference rhs) noexcept
+    {
+        return compare_leaves(lhs, rhs, std::integral_constant<bool, Ordered> {});
+    }
+
+    /// @brief compare two leaves that are only being checked for equality
+    static compare_result compare_leaves(const_reference lhs, const_reference rhs, std::false_type /*ordered*/) noexcept
+    {
+        if (lhs == rhs)
+        {
+            return compare_result::equal;
+        }
+
+        return order_leaves(lhs, rhs, std::false_type {});
+    }
+
+#if JSON_HAS_THREE_WAY_COMPARISON
+    /*!
+    @brief compare two leaves that are being ordered, for operator<=>
+
+    Reached only from operator<=>, so the leaves must be classified exactly
+    as operator<=> classifies them - which is not the same as asking
+    == and then order_leaves(), the way the other overload does it. The two
+    disagree on a binary value: == also compares the subtype, but <=> compares
+    only the bytes, through std::vector<std::uint8_t>::operator<=>. Using <=>
+    itself here keeps a leaf pair classified the same way regardless of how
+    deep it is nested - == first would again call operator<=> a level down
+    through order_leaves(), but call it after a mismatching == already ended
+    the comparison for a pair that <=> alone would still call equivalent.
+    */
+    static compare_result compare_leaves(const_reference lhs, const_reference rhs, std::true_type /*ordered*/) noexcept
+    {
+        const std::partial_ordering order = lhs <=> rhs; // *NOPAD*
+        if (std::is_eq(order))
+        {
+            return compare_result::equal;
+        }
+        if (std::is_lt(order))
+        {
+            return compare_result::less;
+        }
+        if (std::is_gt(order))
+        {
+            return compare_result::greater;
+        }
+        return compare_result::unordered;
+    }
+#else
+    /// @brief compare two leaves that are being ordered, for operator<
+    static compare_result compare_leaves(const_reference lhs, const_reference rhs, std::true_type /*ordered*/) noexcept
+    {
+        if (lhs == rhs)
+        {
+            return compare_result::equal;
+        }
+
+        return order_leaves(lhs, rhs, std::true_type {});
+    }
+#endif
+
+    /*!
+    @brief compare two object keys
+
+    An object compares its entries as pairs of a key and a value, so its keys
+    are compared exactly as std::pair compares them: with < where the objects
+    are being ordered, and with == where they are only checked for equality.
+    Note that this is not the object's own comparator, which for a vector-backed
+    object type such as nlohmann::ordered_map tells equality rather than order.
+    */
+    static compare_result compare_keys(const typename object_t::key_type& lhs,
+                                       const typename object_t::key_type& rhs,
+                                       std::true_type /*ordered*/)
+    {
+        if (lhs < rhs)
+        {
+            return compare_result::less;
+        }
+
+        if (rhs < lhs)
+        {
+            return compare_result::greater;
+        }
+
+        return compare_result::equal;
+    }
+
+    /// @brief check two object keys for equality
+    static compare_result compare_keys(const typename object_t::key_type& lhs,
+                                       const typename object_t::key_type& rhs,
+                                       std::false_type /*ordered*/)
+    {
+        return lhs == rhs ? compare_result::equal : compare_result::unordered;
+    }
+
+    /// @brief tell apart two values that are not equal
+    /// @note only instantiated where the values are being ordered, as a key or
+    ///       string type is not required to be ordered to be compared for equality
+    static compare_result order_leaves(const_reference lhs, const_reference rhs, std::true_type /*ordered*/) noexcept
+    {
+        if (lhs < rhs)
+        {
+            return compare_result::less;
+        }
+
+        if (rhs < lhs)
+        {
+            return compare_result::greater;
+        }
+
+        return compare_result::unordered;
+    }
+
+    /// @brief report two values as not equal without ordering them
+    static compare_result order_leaves(const_reference /*lhs*/, const_reference /*rhs*/, std::false_type /*ordered*/) noexcept
+    {
+        return compare_result::unordered;
+    }
+
+    /*!
+    @brief compare @a lhs and @a rhs without descending into them
+
+    Reached once a comparison has descended @ref detail::recursion_depth_limit levels, so
+    that comparing values cannot exhaust the call stack however deeply they are
+    nested. The two values are walked in lockstep on an explicit stack and
+    compared lexicographically, element by element in the order the containers
+    enumerate them - which is how the container types this library ships compare
+    themselves: a std::map enumerates its entries in key order, and
+    nlohmann::ordered_map in insertion order. An object type that enumerates its
+    entries in an unspecified order, such as std::unordered_map, compares them
+    pairwise instead; the difference could only ever show below the bound.
+
+    Note that the stack this walks with is allocated, while the comparison
+    operators are noexcept and the container comparison this replaces allocated
+    nothing. Failing that allocation therefore ends the process rather than
+    throwing. It only arises for values nested past the bound, and only when
+    memory has run out - where the same comparison used to exhaust the call
+    stack instead - but it is a way to fail that the operators did not have.
+    */
+    template<bool Ordered>
+    static compare_result compare_iteratively(const_reference lhs, const_reference rhs,
+            const bool unordered_compares_equal) noexcept
+    {
+        /// a pair of containers being compared in lockstep
+        struct frame
+        {
+            const basic_json* lhs_value{nullptr};
+            const basic_json* rhs_value{nullptr};
+            typename array_t::const_iterator lhs_array_it{};
+            typename array_t::const_iterator rhs_array_it{};
+            typename object_t::const_iterator lhs_object_it{};
+            typename object_t::const_iterator rhs_object_it{};
+        };
+
+        std::vector<frame> stack;
+        const basic_json* left = &lhs;
+        const basic_json* right = &rhs;
+
+        for (;;)
+        {
+            const auto type = left->m_data.m_type;
+
+            if (type == right->m_data.m_type && (type == value_t::array || type == value_t::object))
+            {
+                // descend: the elements decide, and are compared further down
+                stack.emplace_back();
+                frame& pushed = stack.back();
+                pushed.lhs_value = left;
+                pushed.rhs_value = right;
+
+                if (type == value_t::array)
+                {
+                    pushed.lhs_array_it = left->m_data.m_value.array->cbegin();
+                    pushed.rhs_array_it = right->m_data.m_value.array->cbegin();
+                }
+                else
+                {
+                    pushed.lhs_object_it = left->m_data.m_value.object->cbegin();
+                    pushed.rhs_object_it = right->m_data.m_value.object->cbegin();
+                }
+            }
+            else
+            {
+                const compare_result result = compare_leaves<Ordered>(*left, *right);
+
+                // Values that cannot be ordered - a NaN, say - end an ordered
+                // comparison for std::lexicographical_compare_three_way, but
+                // std::lexicographical_compare treats them as equivalent and
+                // carries on with the next element. Both are reproduced here,
+                // so that a value nested too deeply to descend into compares
+                // exactly as one that is not.
+                if (result != compare_result::equal &&
+                        !(unordered_compares_equal && result == compare_result::unordered))
+                {
+                    return result;
+                }
+            }
+
+            // walk back up past the containers that are exhausted, then take the
+            // next pair of elements from the innermost one that is not
+            for (;;)
+            {
+                if (stack.empty())
+                {
+                    return compare_result::equal;
+                }
+
+                frame& current = stack.back();
+                const bool is_object = current.lhs_value->m_data.m_type == value_t::object;
+
+                const bool lhs_done = is_object
+                                      ? current.lhs_object_it == current.lhs_value->m_data.m_value.object->cend()
+                                      : current.lhs_array_it == current.lhs_value->m_data.m_value.array->cend();
+                const bool rhs_done = is_object
+                                      ? current.rhs_object_it == current.rhs_value->m_data.m_value.object->cend()
+                                      : current.rhs_array_it == current.rhs_value->m_data.m_value.array->cend();
+
+                if (lhs_done || rhs_done)
+                {
+                    // whichever ran out first holds the smaller container; if
+                    // both did, they are equal and the container above decides
+                    if (lhs_done != rhs_done)
+                    {
+                        return lhs_done ? compare_result::less : compare_result::greater;
+                    }
+
+                    stack.pop_back();
+                    continue;
+                }
+
+                if (is_object)
+                {
+                    // an entry is a key and a value, and the key decides first
+                    const compare_result key_result =
+                        compare_keys(current.lhs_object_it->first, current.rhs_object_it->first,
+                                     std::integral_constant<bool, Ordered> {});
+
+                    left = &(current.lhs_object_it->second);
+                    right = &(current.rhs_object_it->second);
+
+                    if (key_result != compare_result::equal)
+                    {
+                        // An object type without a fixed order of its entries -
+                        // std::unordered_map, say - may enumerate two equal
+                        // objects differently, and its operator== does not care.
+                        // Equality then finds the entry by its key; an ordering,
+                        // or an object type that compares its entries in
+                        // sequence (ordered_map), is decided by the key itself.
+                        const auto* rhs_object = current.rhs_value->m_data.m_value.object;
+                        const auto found = (!Ordered && !detail::is_ordered_map<object_t>::value)
+                                           ? rhs_object->find(current.lhs_object_it->first)
+                                           : rhs_object->cend();
+                        // the object's comparator may find an entry whose
+                        // key is only equivalent, not equal, to this one
+                        if (found == rhs_object->cend() || !(found->first == current.lhs_object_it->first))
+                        {
+                            return key_result;
+                        }
+                        right = &(found->second);
+                    }
+
+                    ++current.lhs_object_it;
+                    ++current.rhs_object_it;
+                }
+                else
+                {
+                    left = &(*current.lhs_array_it);
+                    right = &(*current.rhs_array_it);
+                    ++current.lhs_array_it;
+                    ++current.rhs_array_it;
+                }
+
+                break;
+            }
+        }
+    }
+
+
+    /// @brief restore the parent pointers after erasing from an object
+    /// ordered_json keeps its members in a vector, and erasing a member
+    /// re-constructs every member after it in place, which resets their
+    /// parent pointers
+    void set_parents_after_object_erase()
+    {
+#if JSON_DIAGNOSTICS
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(push )
+#pragma warning(disable : 4127) // ignore warning to replace if with if constexpr
+#endif
+        if (detail::is_ordered_map<object_t>::value)
+        {
+            set_parents();
+        }
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning( pop )
+#endif
+#endif
+    }
+
   public:
     //////////////////////////
     // JSON parser callback //
@@ -920,8 +2183,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     /// @brief create a null object
     /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
-    basic_json(std::nullptr_t = nullptr) noexcept // NOLINT(bugprone-exception-escape)
-        : basic_json(value_t::null)
+    basic_json(std::nullptr_t = nullptr) noexcept
     {
         assert_invariant();
     }
@@ -931,7 +2193,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     template < typename CompatibleType,
                typename U = detail::uncvref_t<CompatibleType>,
                detail::enable_if_t <
-                   !detail::is_basic_json<U>::value && detail::is_compatible_type<basic_json_t, U>::value, int > = 0 >
+                   !detail::is_basic_json<U>::value && detail::is_compatible_type<basic_json_t, U>::value
+#if JSON_DISABLE_TUPLE_REFERENCE_CONVERSION
+                   // see https://github.com/nlohmann/json/issues/2226
+                   && !detail::is_basic_json_reference_tuple<basic_json_t, U>::value
+#endif
+                   , int > = 0 >
     basic_json(CompatibleType && val) noexcept(noexcept( // NOLINT(bugprone-forwarding-reference-overload,bugprone-exception-escape)
                 JSONSerializer<U>::to_json(std::declval<basic_json_t&>(),
                                            std::forward<CompatibleType>(val))))
@@ -941,60 +2208,54 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         assert_invariant();
     }
 
+  private:
+    /// whether a basic_json specialization can be converted implicitly into this one;
+    /// with JSON_USE_IMPLICIT_CONVERSIONS set to 0, this is only the case if both share
+    /// the same string type (see https://github.com/nlohmann/json/issues/2649)
+    template<typename BasicJsonType>
+    using is_implicitly_convertible_basic_json = std::integral_constant < bool,
+          (JSON_USE_IMPLICIT_CONVERSIONS != 0)
+          || std::is_same<typename BasicJsonType::string_t, string_t>::value >;
+
+    /// tag to select the constructor that performs the conversion from another basic_json specialization
+    struct convert_basic_json_tag {};
+
+  public:
     /// @brief create a JSON value from an existing one
     /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
     template < typename BasicJsonType,
                detail::enable_if_t <
-                   detail::is_basic_json<BasicJsonType>::value&& !std::is_same<basic_json, BasicJsonType>::value, int > = 0 >
+                   detail::is_basic_json<BasicJsonType>::value&& !std::is_same<basic_json, BasicJsonType>::value
+                   && is_implicitly_convertible_basic_json<BasicJsonType>::value, int > = 0 >
     basic_json(const BasicJsonType& val)
+        : basic_json(val, convert_basic_json_tag{})
+    {}
+
+    /// @brief create a JSON value from an existing one
+    /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
+    template < typename BasicJsonType,
+               detail::enable_if_t <
+                   detail::is_basic_json<BasicJsonType>::value&& !std::is_same<basic_json, BasicJsonType>::value
+                   && !is_implicitly_convertible_basic_json<BasicJsonType>::value, int > = 0 >
+    explicit basic_json(const BasicJsonType& val)
+        : basic_json(val, convert_basic_json_tag{})
+    {}
+
+  private:
+    template<typename BasicJsonType>
+    basic_json(const BasicJsonType& val, convert_basic_json_tag /*unused*/)
 #if JSON_DIAGNOSTIC_POSITIONS
         : start_position(val.start_pos()),
           end_position(val.end_pos())
 #endif
     {
-        using other_boolean_t = typename BasicJsonType::boolean_t;
-        using other_number_float_t = typename BasicJsonType::number_float_t;
-        using other_number_integer_t = typename BasicJsonType::number_integer_t;
-        using other_number_unsigned_t = typename BasicJsonType::number_unsigned_t;
-        using other_string_t = typename BasicJsonType::string_t;
-        using other_object_t = typename BasicJsonType::object_t;
-        using other_array_t = typename BasicJsonType::array_t;
-        using other_binary_t = typename BasicJsonType::binary_t;
-
-        switch (val.type())
+        if (val.is_structured())
         {
-            case value_t::boolean:
-                JSONSerializer<other_boolean_t>::to_json(*this, val.template get<other_boolean_t>());
-                break;
-            case value_t::number_float:
-                JSONSerializer<other_number_float_t>::to_json(*this, val.template get<other_number_float_t>());
-                break;
-            case value_t::number_integer:
-                JSONSerializer<other_number_integer_t>::to_json(*this, val.template get<other_number_integer_t>());
-                break;
-            case value_t::number_unsigned:
-                JSONSerializer<other_number_unsigned_t>::to_json(*this, val.template get<other_number_unsigned_t>());
-                break;
-            case value_t::string:
-                JSONSerializer<other_string_t>::to_json(*this, val.template get_ref<const other_string_t&>());
-                break;
-            case value_t::object:
-                JSONSerializer<other_object_t>::to_json(*this, val.template get_ref<const other_object_t&>());
-                break;
-            case value_t::array:
-                JSONSerializer<other_array_t>::to_json(*this, val.template get_ref<const other_array_t&>());
-                break;
-            case value_t::binary:
-                JSONSerializer<other_binary_t>::to_json(*this, val.template get_ref<const other_binary_t&>());
-                break;
-            case value_t::null:
-                *this = nullptr;
-                break;
-            case value_t::discarded:
-                m_data.m_type = value_t::discarded;
-                break;
-            default:            // LCOV_EXCL_LINE
-                JSON_ASSERT(false); // NOLINT(cert-dcl03-c,hicpp-static-assert,misc-static-assert) LCOV_EXCL_LINE
+            convert_structured(val);
+        }
+        else
+        {
+            convert_leaf(val);
         }
         JSON_ASSERT(m_data.m_type == val.type());
 
@@ -1002,12 +2263,25 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         assert_invariant();
     }
 
+  public:
     /// @brief create a container (array or object) from an initializer list
     /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
     basic_json(initializer_list_t init,
                bool type_deduction = true,
                value_t manual_type = value_t::array)
     {
+#if JSON_BRACE_INIT_COPY_SEMANTICS
+        // a single element that is a value rather than a braced list is
+        // copied or moved as is, whatever its content looks like
+        if (type_deduction && init.size() == 1 && !init.begin()->is_braced_list())
+        {
+            *this = init.begin()->moved_or_copied();
+            set_parents();
+            assert_invariant();
+            return;
+        }
+#endif
+
         // check if each element is an array with two elements whose first
         // element is a string
         bool is_an_object = std::all_of(init.begin(), init.end(),
@@ -1031,15 +2305,15 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             // if an object is wanted but impossible, throw an exception
             if (JSON_HEDLEY_UNLIKELY(manual_type == value_t::object && !is_an_object))
             {
-                JSON_THROW(type_error::create(301, "cannot create object from initializer list", nullptr));
+                JSON_THROW(type_error::create(detail::exception_id::object_from_non_pairs, "cannot create object from initializer list", nullptr));
             }
         }
 
         if (is_an_object)
         {
             // the initializer list is a list of pairs -> create an object
-            m_data.m_type = value_t::object;
             m_data.m_value = value_t::object;
+            m_data.m_type = value_t::object;
 
             for (auto& element_ref : init)
             {
@@ -1061,8 +2335,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             }
 #endif
             // the initializer list describes an array -> create an array
-            m_data.m_type = value_t::array;
             m_data.m_value.array = create<array_t>(init.begin(), init.end());
+            m_data.m_type = value_t::array;
         }
 
         set_parents();
@@ -1075,8 +2349,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json binary(const typename binary_t::container_type& init)
     {
         auto res = basic_json();
-        res.m_data.m_type = value_t::binary;
         res.m_data.m_value = init;
+        res.m_data.m_type = value_t::binary;
         return res;
     }
 
@@ -1086,8 +2360,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json binary(const typename binary_t::container_type& init, typename binary_t::subtype_type subtype)
     {
         auto res = basic_json();
-        res.m_data.m_type = value_t::binary;
         res.m_data.m_value = binary_t(init, subtype);
+        res.m_data.m_type = value_t::binary;
         return res;
     }
 
@@ -1097,8 +2371,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json binary(typename binary_t::container_type&& init)
     {
         auto res = basic_json();
-        res.m_data.m_type = value_t::binary;
         res.m_data.m_value = std::move(init);
+        res.m_data.m_type = value_t::binary;
         return res;
     }
 
@@ -1108,8 +2382,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json binary(typename binary_t::container_type&& init, typename binary_t::subtype_type subtype)
     {
         auto res = basic_json();
-        res.m_data.m_type = value_t::binary;
         res.m_data.m_value = binary_t(std::move(init), subtype);
+        res.m_data.m_type = value_t::binary;
         return res;
     }
 
@@ -1151,7 +2425,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // make sure the iterator fits the current value
         if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
         {
-            JSON_THROW(invalid_iterator::create(201, "iterators are not compatible", nullptr));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterators_incompatible, "iterators are not compatible", nullptr));
         }
 
         // copy type from the first iterator
@@ -1165,11 +2439,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::number_integer:
             case value_t::number_unsigned:
             case value_t::string:
+            case value_t::binary:
             {
                 if (JSON_HEDLEY_UNLIKELY(!first.m_it.primitive_iterator.is_begin()
                                          || !last.m_it.primitive_iterator.is_end()))
                 {
-                    JSON_THROW(invalid_iterator::create(204, "iterators out of range", first.m_object));
+                    JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_range_out_of_range, "iterators out of range", first.m_object));
                 }
                 break;
             }
@@ -1177,7 +2452,6 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::null:
             case value_t::object:
             case value_t::array:
-            case value_t::binary:
             case value_t::discarded:
             default:
                 break;
@@ -1238,7 +2512,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::null:
             case value_t::discarded:
             default:
-                JSON_THROW(invalid_iterator::create(206, detail::concat("cannot construct with iterators from ", first.m_object->type_name()), first.m_object));
+                JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_range_of_null, detail::concat("cannot construct with iterators from ", first.m_object->type_name()), first.m_object));
         }
 
         set_parents();
@@ -1267,60 +2541,15 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // check of passed value is valid
         other.assert_invariant();
 
-        switch (m_data.m_type)
+        if (m_data.m_type == value_t::object || m_data.m_type == value_t::array)
         {
-            case value_t::object:
-            {
-                m_data.m_value = *other.m_data.m_value.object;
-                break;
-            }
-
-            case value_t::array:
-            {
-                m_data.m_value = *other.m_data.m_value.array;
-                break;
-            }
-
-            case value_t::string:
-            {
-                m_data.m_value = *other.m_data.m_value.string;
-                break;
-            }
-
-            case value_t::boolean:
-            {
-                m_data.m_value = other.m_data.m_value.boolean;
-                break;
-            }
-
-            case value_t::number_integer:
-            {
-                m_data.m_value = other.m_data.m_value.number_integer;
-                break;
-            }
-
-            case value_t::number_unsigned:
-            {
-                m_data.m_value = other.m_data.m_value.number_unsigned;
-                break;
-            }
-
-            case value_t::number_float:
-            {
-                m_data.m_value = other.m_data.m_value.number_float;
-                break;
-            }
-
-            case value_t::binary:
-            {
-                m_data.m_value = *other.m_data.m_value.binary;
-                break;
-            }
-
-            case value_t::null:
-            case value_t::discarded:
-            default:
-                break;
+            // copying the container directly would call this constructor again
+            // for every element, once per nesting level
+            copy_structured(other);
+        }
+        else
+        {
+            copy_leaf_value(other, *this);
         }
 
         set_parents();
@@ -1330,15 +2559,15 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @brief move constructor
     /// @sa https://json.nlohmann.me/api/basic_json/basic_json/
     basic_json(basic_json&& other) noexcept
-        : json_base_class_t(std::forward<json_base_class_t>(other)),
-          m_data(std::move(other.m_data)) // cppcheck-suppress[accessForwarded] TODO check
+        : json_base_class_t(std::move(static_cast<json_base_class_t&>(other))),
+          m_data(std::move(other.m_data))
 #if JSON_DIAGNOSTIC_POSITIONS
-        , start_position(other.start_position) // cppcheck-suppress[accessForwarded] TODO check
-        , end_position(other.end_position) // cppcheck-suppress[accessForwarded] TODO check
+        , start_position(other.start_position)
+        , end_position(other.end_position)
 #endif
     {
         // check that the passed value is valid
-        other.assert_invariant(false); // cppcheck-suppress[accessForwarded]
+        other.assert_invariant(false);
 
         // invalidate payload
         other.m_data.m_type = value_t::null;
@@ -1553,17 +2782,6 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     // value access //
     //////////////////
 
-    /// get a boolean (explicit)
-    boolean_t get_impl(boolean_t* /*unused*/) const
-    {
-        if (JSON_HEDLEY_LIKELY(is_boolean()))
-        {
-            return m_data.m_value.boolean;
-        }
-
-        JSON_THROW(type_error::create(302, detail::concat("type must be boolean, but is ", type_name()), this));
-    }
-
     /// get a pointer to the value (object)
     object_t* get_impl_ptr(object_t* /*unused*/) noexcept
     {
@@ -1682,7 +2900,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             return *ptr;
         }
 
-        JSON_THROW(type_error::create(303, detail::concat("incompatible ReferenceType for get_ref, actual type is ", obj.type_name()), &obj));
+        JSON_THROW(type_error::create(detail::exception_id::incompatible_reference_type, detail::concat("incompatible ReferenceType for get_ref, actual type is ", obj.type_name()), &obj));
     }
 
   public:
@@ -1741,12 +2959,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     @throw what @ref json_serializer<ValueType> `from_json()` method throws
 
-    @liveexample{The example below shows several conversions from JSON values
+    The example below shows several conversions from JSON values
     to other types. There a few things to note: (1) Floating-point numbers can
-    be converted to integers\, (2) A JSON array can be converted to a standard
-    `std::vector<short>`\, (3) A JSON object can be converted to C++
-    associative containers such as `std::unordered_map<std::string\,
-    json>`.,get__ValueType_const}
+    be converted to integers, (2) A JSON array can be converted to a standard
+    `std::vector<short>`, (3) A JSON object can be converted to C++
+    associative containers such as `std::unordered_map<std::string,
+    json>`.
 
     @since version 2.1.0
     */
@@ -1760,6 +2978,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     {
         auto ret = ValueType();
         JSONSerializer<ValueType>::from_json(*this, ret);
+        // false positive: ret is returned by value, not its address
+        // @infer-ignore STACK_VARIABLE_ADDRESS_ESCAPE
         return ret;
     }
 
@@ -1813,7 +3033,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     @return a copy of *this, converted into @a BasicJsonType
 
-    @complexity Depending on the implementation of the called `from_json()`
+    Complexity: Depending on the implementation of the called `from_json()`
                 method.
 
     @since version 3.2.0
@@ -1824,7 +3044,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    int > = 0 >
     BasicJsonType get_impl(detail::priority_tag<2> /*unused*/) const
     {
-        return *this;
+        return BasicJsonType(*this);
     }
 
     /*!
@@ -1837,7 +3057,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     @return a copy of *this
 
-    @complexity Constant.
+    Complexity: Constant.
 
     @since version 2.1.0
     */
@@ -1883,7 +3103,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     @tparam ValueTypeCV the provided value type
     @tparam ValueType the returned value type
 
-    @return copy of the JSON value, converted to @tparam ValueType if necessary
+    @return copy of the JSON value, converted to @a ValueType if necessary
 
     @throw what @ref json_serializer<ValueType> `from_json()` method throws if conversion is required
 
@@ -1916,17 +3136,17 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     @tparam PointerType pointer type; must be a pointer to @ref array_t, @ref
     object_t, @ref string_t, @ref boolean_t, @ref number_integer_t,
-    @ref number_unsigned_t, or @ref number_float_t.
+    @ref number_unsigned_t, @ref number_float_t, or @ref binary_t.
 
     @return pointer to the internally stored JSON value if the requested
     pointer type @a PointerType fits to the JSON value; `nullptr` otherwise
 
-    @complexity Constant.
+    Complexity: Constant.
 
-    @liveexample{The example below shows how pointers to internal values of a
+    The example below shows how pointers to internal values of a
     JSON value can be requested. Note that no type conversions are made and a
     `nullptr` is returned if the value and the requested pointer type does not
-    match.,get__PointerType}
+    match.
 
     @sa see @ref get_ptr() for explicit pointer-member access
 
@@ -1950,6 +3170,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     ValueType & get_to(ValueType& v) const noexcept(noexcept(
                 JSONSerializer<ValueType>::from_json(std::declval<const basic_json_t&>(), v)))
     {
+        static_assert(!std::is_const<ValueType>::value, "get_to() cannot deserialize into a const value");
         JSONSerializer<ValueType>::from_json(*this, v);
         return v;
     }
@@ -1962,7 +3183,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                  int> = 0>
     ValueType & get_to(ValueType& v) const
     {
-        v = *this;
+        v = ValueType(*this);
         return v;
     }
 
@@ -1975,6 +3196,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     noexcept(noexcept(JSONSerializer<Array>::from_json(
                           std::declval<const basic_json_t&>(), v)))
     {
+        static_assert(!std::is_const<T>::value, "get_to() cannot deserialize into a const value");
         JSONSerializer<Array>::from_json(*this, v);
         return v;
     }
@@ -2018,14 +3240,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     to the JSON value type (e.g., the JSON value is of type boolean, but a
     string is requested); see example below
 
-    @complexity Linear in the size of the JSON value.
+    Complexity: Linear in the size of the JSON value.
 
-    @liveexample{The example below shows several conversions from JSON values
+    The example below shows several conversions from JSON values
     to other types. There a few things to note: (1) Floating-point numbers can
-    be converted to integers\, (2) A JSON array can be converted to a standard
-    `std::vector<short>`\, (3) A JSON object can be converted to C++
-    associative containers such as `std::unordered_map<std::string\,
-    json>`.,operator__ValueType}
+    be converted to integers, (2) A JSON array can be converted to a standard
+    `std::vector<short>`, (3) A JSON object can be converted to C++
+    associative containers such as `std::unordered_map<std::string,
+    json>`.
 
     @since version 1.0.0
     */
@@ -2062,7 +3284,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     {
         if (!is_binary())
         {
-            JSON_THROW(type_error::create(302, detail::concat("type must be binary, but is ", type_name()), this));
+            detail::throw_type_must_be("binary", *this);
         }
 
         return *get_ptr<binary_t*>();
@@ -2074,14 +3296,138 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     {
         if (!is_binary())
         {
-            JSON_THROW(type_error::create(302, detail::concat("type must be binary, but is ", type_name()), this));
+            detail::throw_type_must_be("binary", *this);
         }
 
         return *get_ptr<const binary_t*>();
     }
 
+    /// @brief access the custom base class
+    /// @sa https://json.nlohmann.me/api/basic_json/as_base_class/
+    json_base_class_t& as_base_class() noexcept
+    {
+        return static_cast<json_base_class_t&>(*this);
+    }
+
+    /// @brief access the custom base class
+    /// @sa https://json.nlohmann.me/api/basic_json/as_base_class/
+    const json_base_class_t& as_base_class() const noexcept
+    {
+        return static_cast<const json_base_class_t&>(*this);
+    }
+
     /// @}
 
+  private:
+    /// @brief look up @a key in the object held by @a j, for either constness of @a j
+    /// @note the single place that performs a (possibly transparent) object key lookup
+    template<typename Self, typename KeyType>
+    static auto object_lookup(Self& j, KeyType&& key)
+    -> decltype(j.m_data.m_value.object->find(lookup_key(std::forward<KeyType>(key))))
+    {
+        return j.m_data.m_value.object->find(lookup_key(std::forward<KeyType>(key)));
+    }
+
+    /// @brief checked object element access used by the at() overloads taking a key
+    /// @throw type_error.304 if @a j is not an object
+    /// @throw out_of_range.403 if @a key is not found
+    template<typename Self, typename KeyType>
+    static auto object_at(Self& j, KeyType&& key)
+    -> decltype((object_lookup(j, std::forward<KeyType>(key))->second))
+    {
+        // at only works for objects
+        if (JSON_HEDLEY_UNLIKELY(!j.is_object()))
+        {
+            detail::throw_cannot_use_with(detail::exception_id::at_wrong_type, "at()", j);
+        }
+
+        auto it = object_lookup(j, std::forward<KeyType>(key));
+        if (it == j.m_data.m_value.object->end())
+        {
+            // key is only forwarded into the lookup above: object_t::find() (a plain
+            // std::map or ordered_map) never moves from its argument, so key is still
+            // valid here regardless of whether KeyType was deduced as an rvalue reference
+            // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved)
+            JSON_THROW(out_of_range::create(detail::exception_id::key_not_found, detail::concat("key '", key_for_message(key), "' not found"), &j));
+        }
+        return it->second;
+    }
+
+    /// @brief key as it is passed to detail::concat for an error message
+    /// @note keys with data() and size() (such as string_t itself or a string
+    ///       view) are passed through unchanged, so a miss does not copy them;
+    ///       other keys (such as string literals or key types that only convert
+    ///       to string_t) are converted to string_t
+    template < typename KeyType, detail::enable_if_t < detail::detect_string_can_append_data<string_t, KeyType>::value, int > = 0 >
+    static const KeyType & key_for_message(const KeyType& key)
+    {
+        return key; // NOLINT(bugprone-return-const-ref-from-parameter): the result is only passed to concat() within the full-expression that holds key
+    }
+
+    template < typename KeyType, detail::enable_if_t < !detail::detect_string_can_append_data<string_t, KeyType>::value, int > = 0 >
+    static string_t key_for_message(const KeyType& key)
+    {
+        return string_t(key);
+    }
+
+    /// @brief checked array element access used by the at() overloads taking an index
+    /// @throw type_error.304 if @a j is not an array
+    /// @throw out_of_range.401 if @a idx is out of range
+    template<typename Self>
+    static auto array_at(Self& j, size_type idx)
+    -> decltype((*j.m_data.m_value.array)[idx])
+    {
+        // at only works for arrays
+        if (JSON_HEDLEY_UNLIKELY(!j.is_array()))
+        {
+            detail::throw_cannot_use_with(detail::exception_id::at_wrong_type, "at()", j);
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(idx >= j.m_data.m_value.array->size()))
+        {
+            JSON_THROW(out_of_range::create(detail::exception_id::array_index_out_of_range, detail::concat("array index ", std::to_string(idx), " is out of range"), &j));
+        }
+
+        return (*j.m_data.m_value.array)[idx];
+    }
+
+    /// @brief convert a null value to an empty container of type @a Container
+    /// @tparam Container array_t or object_t; any other type does not compile
+    template<typename Container>
+    void convert_null_to()
+    {
+        JSON_ASSERT(is_null());
+        // create the container before touching the type, so a throwing
+        // allocation leaves this value as a valid null rather than a type
+        // tag with a dangling/null pointer behind it
+        set_container(create<Container>());
+        assert_invariant();
+    }
+
+    /// @brief store a freshly created array and set the matching type
+    void set_container(array_t* array) noexcept
+    {
+        m_data.m_value.array = array;
+        m_data.m_type = value_t::array;
+    }
+
+    /// @brief store a freshly created object and set the matching type
+    void set_container(object_t* object) noexcept
+    {
+        m_data.m_value.object = object;
+        m_data.m_type = value_t::object;
+    }
+
+    /// @brief throws because operator[] is not supported for the type of this value
+    /// @param[in] argument  the kind of the operator's argument, "numeric" or "string"
+    /// @throw type_error.305 always
+    JSON_HEDLEY_NO_RETURN void throw_subscript_wrong_type(const char* argument) const
+    {
+        detail::throw_cannot_use_with(detail::exception_id::subscript_wrong_type,
+                                      detail::concat("operator[] with a ", argument, " argument").c_str(), *this);
+    }
+
+  public:
     ////////////////////
     // element access //
     ////////////////////
@@ -2094,54 +3440,21 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/at/
     reference at(size_type idx)
     {
-        // at only works for arrays
-        if (JSON_HEDLEY_UNLIKELY(!is_array()))
-        {
-            JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
-        }
-
-        if (JSON_HEDLEY_UNLIKELY(idx >= m_data.m_value.array->size()))
-        {
-            JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
-        }
-
-        return set_parent((*m_data.m_value.array)[idx]);
+        return set_parent(array_at(*this, idx));
     }
 
     /// @brief access specified array element with bounds checking
     /// @sa https://json.nlohmann.me/api/basic_json/at/
     const_reference at(size_type idx) const
     {
-        // at only works for arrays
-        if (JSON_HEDLEY_UNLIKELY(!is_array()))
-        {
-            JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
-        }
-
-        if (JSON_HEDLEY_UNLIKELY(idx >= m_data.m_value.array->size()))
-        {
-            JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
-        }
-
-        return (*m_data.m_value.array)[idx];
+        return array_at(*this, idx);
     }
 
     /// @brief access specified object element with bounds checking
     /// @sa https://json.nlohmann.me/api/basic_json/at/
     reference at(const typename object_t::key_type& key)
     {
-        // at only works for objects
-        if (JSON_HEDLEY_UNLIKELY(!is_object()))
-        {
-            JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
-        }
-
-        auto it = m_data.m_value.object->find(key);
-        if (it == m_data.m_value.object->end())
-        {
-            JSON_THROW(out_of_range::create(403, detail::concat("key '", key, "' not found"), this));
-        }
-        return set_parent(it->second);
+        return set_parent(object_at(*this, key));
     }
 
     /// @brief access specified object element with bounds checking
@@ -2150,36 +3463,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                  detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
     reference at(KeyType && key)
     {
-        // at only works for objects
-        if (JSON_HEDLEY_UNLIKELY(!is_object()))
-        {
-            JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
-        }
-
-        auto it = m_data.m_value.object->find(std::forward<KeyType>(key));
-        if (it == m_data.m_value.object->end())
-        {
-            JSON_THROW(out_of_range::create(403, detail::concat("key '", string_t(std::forward<KeyType>(key)), "' not found"), this));
-        }
-        return set_parent(it->second);
+        return set_parent(object_at(*this, std::forward<KeyType>(key)));
     }
 
     /// @brief access specified object element with bounds checking
     /// @sa https://json.nlohmann.me/api/basic_json/at/
     const_reference at(const typename object_t::key_type& key) const
     {
-        // at only works for objects
-        if (JSON_HEDLEY_UNLIKELY(!is_object()))
-        {
-            JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
-        }
-
-        auto it = m_data.m_value.object->find(key);
-        if (it == m_data.m_value.object->end())
-        {
-            JSON_THROW(out_of_range::create(403, detail::concat("key '", key, "' not found"), this));
-        }
-        return it->second;
+        return object_at(*this, key);
     }
 
     /// @brief access specified object element with bounds checking
@@ -2188,18 +3479,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                  detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
     const_reference at(KeyType && key) const
     {
-        // at only works for objects
-        if (JSON_HEDLEY_UNLIKELY(!is_object()))
-        {
-            JSON_THROW(type_error::create(304, detail::concat("cannot use at() with ", type_name()), this));
-        }
-
-        auto it = m_data.m_value.object->find(std::forward<KeyType>(key));
-        if (it == m_data.m_value.object->end())
-        {
-            JSON_THROW(out_of_range::create(403, detail::concat("key '", string_t(std::forward<KeyType>(key)), "' not found"), this));
-        }
-        return it->second;
+        return object_at(*this, std::forward<KeyType>(key));
     }
 
     /// @brief access specified array element
@@ -2209,9 +3489,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // implicitly convert a null value to an empty array
         if (is_null())
         {
-            m_data.m_type = value_t::array;
-            m_data.m_value.array = create<array_t>();
-            assert_invariant();
+            convert_null_to<array_t>();
         }
 
         // operator[] only works for arrays
@@ -2220,6 +3498,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             // fill up the array with null values if given idx is outside the range
             if (idx >= m_data.m_value.array->size())
             {
+                // idx + 1 would overflow size_type and wrap to 0, which would empty
+                // the array instead of growing it; reject such an idx the same way
+                // resize() rejects other indices that are too large to represent
+                if (JSON_HEDLEY_UNLIKELY(idx == (std::numeric_limits<size_type>::max)()))
+                {
+                    JSON_THROW(std::length_error(detail::concat("array index ", std::to_string(idx), " exceeds size_type")));
+                }
 #if JSON_DIAGNOSTICS
                 // remember array size & capacity before resizing
                 const auto old_size = m_data.m_value.array->size();
@@ -2246,7 +3531,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             return m_data.m_value.array->operator[](idx);
         }
 
-        JSON_THROW(type_error::create(305, detail::concat("cannot use operator[] with a numeric argument with ", type_name()), this));
+        throw_subscript_wrong_type("numeric");
     }
 
     /// @brief access specified array element
@@ -2256,10 +3541,11 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // const operator[] only works for arrays
         if (JSON_HEDLEY_LIKELY(is_array()))
         {
+            JSON_ASSERT(idx < m_data.m_value.array->size());
             return m_data.m_value.array->operator[](idx);
         }
 
-        JSON_THROW(type_error::create(305, detail::concat("cannot use operator[] with a numeric argument with ", type_name()), this));
+        throw_subscript_wrong_type("numeric");
     }
 
     /// @brief access specified object element
@@ -2269,9 +3555,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // implicitly convert a null value to an empty object
         if (is_null())
         {
-            m_data.m_type = value_t::object;
-            m_data.m_value.object = create<object_t>();
-            assert_invariant();
+            convert_null_to<object_t>();
         }
 
         // operator[] only works for objects
@@ -2281,7 +3565,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             return set_parent(result.first->second);
         }
 
-        JSON_THROW(type_error::create(305, detail::concat("cannot use operator[] with a string argument with ", type_name()), this));
+        throw_subscript_wrong_type("string");
     }
 
     /// @brief access specified object element
@@ -2291,12 +3575,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // const operator[] only works for objects
         if (JSON_HEDLEY_LIKELY(is_object()))
         {
-            auto it = m_data.m_value.object->find(key);
+            auto it = object_lookup(*this, key);
             JSON_ASSERT(it != m_data.m_value.object->end());
             return it->second;
         }
 
-        JSON_THROW(type_error::create(305, detail::concat("cannot use operator[] with a string argument with ", type_name()), this));
+        throw_subscript_wrong_type("string");
     }
 
     // these two functions resolve a (const) char * ambiguity affecting Clang and MSVC
@@ -2322,19 +3606,17 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // implicitly convert a null value to an empty object
         if (is_null())
         {
-            m_data.m_type = value_t::object;
-            m_data.m_value.object = create<object_t>();
-            assert_invariant();
+            convert_null_to<object_t>();
         }
 
         // operator[] only works for objects
         if (JSON_HEDLEY_LIKELY(is_object()))
         {
-            auto result = m_data.m_value.object->emplace(std::forward<KeyType>(key), nullptr);
+            auto result = m_data.m_value.object->emplace(lookup_key(std::forward<KeyType>(key)), nullptr);
             return set_parent(result.first->second);
         }
 
-        JSON_THROW(type_error::create(305, detail::concat("cannot use operator[] with a string argument with ", type_name()), this));
+        throw_subscript_wrong_type("string");
     }
 
     /// @brief access specified object element
@@ -2346,25 +3628,61 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // const operator[] only works for objects
         if (JSON_HEDLEY_LIKELY(is_object()))
         {
-            auto it = m_data.m_value.object->find(std::forward<KeyType>(key));
+            auto it = object_lookup(*this, std::forward<KeyType>(key));
             JSON_ASSERT(it != m_data.m_value.object->end());
             return it->second;
         }
 
-        JSON_THROW(type_error::create(305, detail::concat("cannot use operator[] with a string argument with ", type_name()), this));
+        throw_subscript_wrong_type("string");
     }
 
   private:
     template<typename KeyType>
-    using is_comparable_with_object_key = detail::is_comparable <
-        object_comparator_t, const typename object_t::key_type&, KeyType >;
+    using is_comparable_with_object_key = std::integral_constant < bool,
+        detail::is_comparable <
+            object_comparator_t, const typename object_t::key_type&, KeyType >::value
+        || detail::is_string_view_convertible_key_type<basic_json_t, KeyType>::value >;
 
     template<typename ValueType>
     using value_return_type = std::conditional <
         detail::is_c_string_uncvref<ValueType>::value,
         string_t, typename std::decay<ValueType>::type >;
 
+    /// @brief look up @a key for value(), the single place shared by all key-based overloads
+    /// @throw type_error.306 if this is not an object
+    /// @return a pointer to the found value, or `nullptr` if @a key was not found
+    template<typename KeyType>
+    const basic_json* value_member(KeyType&& key) const
+    {
+        // value only works for objects
+        if (JSON_HEDLEY_UNLIKELY(!is_object()))
+        {
+            detail::throw_cannot_use_with(detail::exception_id::value_wrong_type, "value()", *this);
+        }
+
+        const auto it = find(std::forward<KeyType>(key));
+        return it != end() ? &*it : nullptr;
+    }
+
+    /// @brief resolve @a ptr for value(), the single place shared by both json_pointer overloads
+    /// @throw type_error.306 if this is not an array or object
+    /// @return a pointer to the resolved value, or `nullptr` if @a ptr does not resolve
+    const basic_json* value_pointee(const json_pointer& ptr) const
+    {
+        // value only works for arrays and objects
+        if (JSON_HEDLEY_UNLIKELY(!is_structured()))
+        {
+            detail::throw_cannot_use_with(detail::exception_id::value_wrong_type, "value()", *this);
+        }
+
+        return ptr.get_checked_or_null(this);
+    }
+
   public:
+    // an integer literal 0 would otherwise convert to a null const char* and from there to key_type
+    template<typename T, typename ValueType, detail::enable_if_t<std::is_integral<T>::value, int> = 0>
+    ValueType value(T, ValueType&&) const = delete;
+
     /// @brief access specified object element with default value
     /// @sa https://json.nlohmann.me/api/basic_json/value/
     template < class ValueType, detail::enable_if_t <
@@ -2373,20 +3691,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     ValueType value(const typename object_t::key_type& key, const ValueType& default_value) const
     {
-        // value only works for objects
-        if (JSON_HEDLEY_LIKELY(is_object()))
-        {
-            // If 'key' is found, return its value. Otherwise, return `default_value'.
-            const auto it = find(key);
-            if (it != end())
-            {
-                return it->template get<ValueType>();
-            }
-
-            return default_value;
-        }
-
-        JSON_THROW(type_error::create(306, detail::concat("cannot use value() with ", type_name()), this));
+        // If 'key' is found, return its value. Otherwise, return `default_value'.
+        const auto* found = value_member(key);
+        return found != nullptr ? found->template get<ValueType>() : default_value;
     }
 
     /// @brief access specified object element with default value
@@ -2398,20 +3705,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     ReturnType value(const typename object_t::key_type& key, ValueType && default_value) const
     {
-        // value only works for objects
-        if (JSON_HEDLEY_LIKELY(is_object()))
-        {
-            // If 'key' is found, return its value. Otherwise, return `default_value'.
-            const auto it = find(key);
-            if (it != end())
-            {
-                return it->template get<ReturnType>();
-            }
-
-            return std::forward<ValueType>(default_value);
-        }
-
-        JSON_THROW(type_error::create(306, detail::concat("cannot use value() with ", type_name()), this));
+        // If 'key' is found, return its value. Otherwise, return `default_value'.
+        const auto* found = value_member(key);
+        return found != nullptr ? found->template get<ReturnType>() : std::forward<ValueType>(default_value);
     }
 
     /// @brief access specified object element with default value
@@ -2424,23 +3720,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     ValueType value(KeyType && key, const ValueType& default_value) const
     {
-        // value only works for objects
-        if (JSON_HEDLEY_LIKELY(is_object()))
-        {
-            // If 'key' is found, return its value. Otherwise, return `default_value'.
-            const auto it = find(std::forward<KeyType>(key));
-            if (it != end())
-            {
-                return it->template get<ValueType>();
-            }
-
-            return default_value;
-        }
-
-        JSON_THROW(type_error::create(306, detail::concat("cannot use value() with ", type_name()), this));
+        // If 'key' is found, return its value. Otherwise, return `default_value'.
+        const auto* found = value_member(std::forward<KeyType>(key));
+        return found != nullptr ? found->template get<ValueType>() : default_value;
     }
 
-    /// @brief access specified object element via JSON Pointer with default value
+    /// @brief access specified object element with default value
     /// @sa https://json.nlohmann.me/api/basic_json/value/
     template < class ValueType, class KeyType, class ReturnType = typename value_return_type<ValueType>::type,
                detail::enable_if_t <
@@ -2451,20 +3736,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     ReturnType value(KeyType && key, ValueType && default_value) const
     {
-        // value only works for objects
-        if (JSON_HEDLEY_LIKELY(is_object()))
-        {
-            // If 'key' is found, return its value. Otherwise, return `default_value'.
-            const auto it = find(std::forward<KeyType>(key));
-            if (it != end())
-            {
-                return it->template get<ReturnType>();
-            }
-
-            return std::forward<ValueType>(default_value);
-        }
-
-        JSON_THROW(type_error::create(306, detail::concat("cannot use value() with ", type_name()), this));
+        // If 'key' is found, return its value. Otherwise, return `default_value'.
+        const auto* found = value_member(std::forward<KeyType>(key));
+        return found != nullptr ? found->template get<ReturnType>() : std::forward<ValueType>(default_value);
     }
 
     /// @brief access specified object element via JSON Pointer with default value
@@ -2474,21 +3748,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     ValueType value(const json_pointer& ptr, const ValueType& default_value) const
     {
-        // value only works for arrays and objects
-        if (JSON_HEDLEY_LIKELY(is_structured()))
-        {
-            // If the pointer resolves to a value, return it. Otherwise, return
-            // 'default_value'.
-            const auto* res = ptr.get_checked_or_null(this);
-            if (JSON_HEDLEY_LIKELY(res != nullptr))
-            {
-                return res->template get<ValueType>();
-            }
-
-            return default_value;
-        }
-
-        JSON_THROW(type_error::create(306, detail::concat("cannot use value() with ", type_name()), this));
+        // If the pointer resolves to a value, return it. Otherwise, return
+        // 'default_value'.
+        const auto* found = value_pointee(ptr);
+        return found != nullptr ? found->template get<ValueType>() : default_value;
     }
 
     /// @brief access specified object element via JSON Pointer with default value
@@ -2499,21 +3762,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     ReturnType value(const json_pointer& ptr, ValueType && default_value) const
     {
-        // value only works for arrays and objects
-        if (JSON_HEDLEY_LIKELY(is_structured()))
-        {
-            // If the pointer resolves to a value, return it. Otherwise, return
-            // 'default_value'.
-            const auto* res = ptr.get_checked_or_null(this);
-            if (JSON_HEDLEY_LIKELY(res != nullptr))
-            {
-                return res->template get<ReturnType>();
-            }
-
-            return std::forward<ValueType>(default_value);
-        }
-
-        JSON_THROW(type_error::create(306, detail::concat("cannot use value() with ", type_name()), this));
+        // If the pointer resolves to a value, return it. Otherwise, return
+        // 'default_value'.
+        const auto* found = value_pointee(ptr);
+        return found != nullptr ? found->template get<ReturnType>() : std::forward<ValueType>(default_value);
     }
 
     template < class ValueType, class BasicJsonType, detail::enable_if_t <
@@ -2522,9 +3774,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     ValueType value(const ::nlohmann::json_pointer<BasicJsonType>& ptr, const ValueType& default_value) const
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return value(ptr.convert(), default_value);
     }
+#endif
 
     template < class ValueType, class BasicJsonType, class ReturnType = typename value_return_type<ValueType>::type,
                detail::enable_if_t <
@@ -2533,9 +3789,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                    && !std::is_same<value_t, detail::uncvref_t<ValueType>>::value, int > = 0 >
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     ReturnType value(const ::nlohmann::json_pointer<BasicJsonType>& ptr, ValueType && default_value) const
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return value(ptr.convert(), std::forward<ValueType>(default_value));
     }
+#endif
 
     /// @brief access the first element
     /// @sa https://json.nlohmann.me/api/basic_json/front/
@@ -2579,7 +3839,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // make sure the iterator fits the current value
         if (JSON_HEDLEY_UNLIKELY(this != pos.m_object))
         {
-            JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterator does not fit current value", this));
         }
 
         IteratorType result = end();
@@ -2595,24 +3855,11 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             {
                 if (JSON_HEDLEY_UNLIKELY(!pos.m_it.primitive_iterator.is_begin()))
                 {
-                    JSON_THROW(invalid_iterator::create(205, "iterator out of range", this));
+                    JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_out_of_range, "iterator out of range", this));
                 }
 
-                if (is_string())
-                {
-                    AllocatorType<string_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.string);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.string, 1);
-                    m_data.m_value.string = nullptr;
-                }
-                else if (is_binary())
-                {
-                    AllocatorType<binary_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.binary);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.binary, 1);
-                    m_data.m_value.binary = nullptr;
-                }
-
+                m_data.m_value.destroy(m_data.m_type);
+                m_data.m_value = {};
                 m_data.m_type = value_t::null;
                 assert_invariant();
                 break;
@@ -2621,6 +3868,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::object:
             {
                 result.m_it.object_iterator = erase_from_object(pos.m_it.object_iterator);
+                set_parents_after_object_erase();
                 break;
             }
 
@@ -2633,7 +3881,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::null:
             case value_t::discarded:
             default:
-                JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+                detail::throw_cannot_use_with(detail::exception_id::erase_wrong_type, "erase()", *this);
         }
 
         return result;
@@ -2649,7 +3897,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // make sure the iterator fits the current value
         if (JSON_HEDLEY_UNLIKELY(this != first.m_object || this != last.m_object))
         {
-            JSON_THROW(invalid_iterator::create(203, "iterators do not fit current value", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_range_from_other_value, "iterators do not fit current value", this));
         }
 
         IteratorType result = end();
@@ -2663,27 +3911,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::string:
             case value_t::binary:
             {
-                if (JSON_HEDLEY_LIKELY(!first.m_it.primitive_iterator.is_begin()
-                                       || !last.m_it.primitive_iterator.is_end()))
+                if (JSON_HEDLEY_UNLIKELY(!first.m_it.primitive_iterator.is_begin()
+                                         || !last.m_it.primitive_iterator.is_end()))
                 {
-                    JSON_THROW(invalid_iterator::create(204, "iterators out of range", this));
+                    JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_range_out_of_range, "iterators out of range", this));
                 }
 
-                if (is_string())
-                {
-                    AllocatorType<string_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.string);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.string, 1);
-                    m_data.m_value.string = nullptr;
-                }
-                else if (is_binary())
-                {
-                    AllocatorType<binary_t> alloc;
-                    std::allocator_traits<decltype(alloc)>::destroy(alloc, m_data.m_value.binary);
-                    std::allocator_traits<decltype(alloc)>::deallocate(alloc, m_data.m_value.binary, 1);
-                    m_data.m_value.binary = nullptr;
-                }
-
+                m_data.m_value.destroy(m_data.m_type);
+                m_data.m_value = {};
                 m_data.m_type = value_t::null;
                 assert_invariant();
                 break;
@@ -2693,6 +3928,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             {
                 result.m_it.object_iterator = m_data.m_value.object->erase(first.m_it.object_iterator,
                                               last.m_it.object_iterator);
+                set_parents_after_object_erase();
                 break;
             }
 
@@ -2706,7 +3942,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::null:
             case value_t::discarded:
             default:
-                JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+                detail::throw_cannot_use_with(detail::exception_id::erase_wrong_type, "erase()", *this);
         }
 
         return result;
@@ -2720,10 +3956,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // this erase only works for objects
         if (JSON_HEDLEY_UNLIKELY(!is_object()))
         {
-            JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::erase_wrong_type, "erase()", *this);
         }
 
-        return m_data.m_value.object->erase(std::forward<KeyType>(key));
+        const auto erased = m_data.m_value.object->erase(std::forward<KeyType>(key));
+        set_parents_after_object_erase();
+        return erased;
     }
 
     template < typename KeyType, detail::enable_if_t <
@@ -2733,13 +3971,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // this erase only works for objects
         if (JSON_HEDLEY_UNLIKELY(!is_object()))
         {
-            JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::erase_wrong_type, "erase()", *this);
         }
 
-        const auto it = m_data.m_value.object->find(std::forward<KeyType>(key));
+        const auto it = object_lookup(*this, std::forward<KeyType>(key));
         if (it != m_data.m_value.object->end())
         {
             m_data.m_value.object->erase(it);
+            set_parents_after_object_erase();
             return 1;
         }
         return 0;
@@ -2762,7 +4001,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                  detail::is_usable_as_basic_json_key_type<basic_json_t, KeyType>::value, int> = 0>
     size_type erase(KeyType && key)
     {
-        return erase_internal(std::forward<KeyType>(key));
+        return erase_internal(lookup_key(std::forward<KeyType>(key)));
     }
 
     /// @brief remove element from a JSON array given an index
@@ -2774,14 +4013,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         {
             if (JSON_HEDLEY_UNLIKELY(idx >= size()))
             {
-                JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
+                JSON_THROW(out_of_range::create(detail::exception_id::array_index_out_of_range, detail::concat("array index ", std::to_string(idx), " is out of range"), this));
             }
 
             m_data.m_value.array->erase(m_data.m_value.array->begin() + static_cast<difference_type>(idx));
         }
         else
         {
-            JSON_THROW(type_error::create(307, detail::concat("cannot use erase() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::erase_wrong_type, "erase()", *this);
         }
     }
 
@@ -2794,6 +4033,16 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @name lookup
     /// @{
 
+    // an integer literal 0 would otherwise convert to a null const char* and from there to key_type
+    template<typename T, detail::enable_if_t<std::is_integral<T>::value, int> = 0>
+    iterator find(T) = delete;
+    template<typename T, detail::enable_if_t<std::is_integral<T>::value, int> = 0>
+    const_iterator find(T) const = delete;
+    template<typename T, detail::enable_if_t<std::is_integral<T>::value, int> = 0>
+    size_type count(T) const = delete;
+    template<typename T, detail::enable_if_t<std::is_integral<T>::value, int> = 0>
+    bool contains(T) const = delete;
+
     /// @brief find an element in a JSON object
     /// @sa https://json.nlohmann.me/api/basic_json/find/
     iterator find(const typename object_t::key_type& key)
@@ -2802,7 +4051,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
         if (is_object())
         {
-            result.m_it.object_iterator = m_data.m_value.object->find(key);
+            result.m_it.object_iterator = object_lookup(*this, key);
         }
 
         return result;
@@ -2816,7 +4065,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
         if (is_object())
         {
-            result.m_it.object_iterator = m_data.m_value.object->find(key);
+            result.m_it.object_iterator = object_lookup(*this, key);
         }
 
         return result;
@@ -2832,7 +4081,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
         if (is_object())
         {
-            result.m_it.object_iterator = m_data.m_value.object->find(std::forward<KeyType>(key));
+            result.m_it.object_iterator = object_lookup(*this, std::forward<KeyType>(key));
         }
 
         return result;
@@ -2848,7 +4097,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
         if (is_object())
         {
-            result.m_it.object_iterator = m_data.m_value.object->find(std::forward<KeyType>(key));
+            result.m_it.object_iterator = object_lookup(*this, std::forward<KeyType>(key));
         }
 
         return result;
@@ -2871,7 +4120,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     size_type count(KeyType && key) const
     {
         // return 0 for all nonobject types
-        return is_object() ? m_data.m_value.object->count(std::forward<KeyType>(key)) : 0;
+        return is_object() ? m_data.m_value.object->count(lookup_key(std::forward<KeyType>(key))) : 0;
     }
 
     /// @brief check the existence of an element in a JSON object
@@ -2879,7 +4128,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     bool contains(const typename object_t::key_type& key) const
     {
-        return is_object() && m_data.m_value.object->find(key) != m_data.m_value.object->end();
+        return is_object() && object_lookup(*this, key) != m_data.m_value.object->end();
     }
 
     /// @brief check the existence of an element in a JSON object
@@ -2889,7 +4138,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     bool contains(KeyType && key) const
     {
-        return is_object() && m_data.m_value.object->find(std::forward<KeyType>(key)) != m_data.m_value.object->end();
+        return is_object() && object_lookup(*this, std::forward<KeyType>(key)) != m_data.m_value.object->end();
     }
 
     /// @brief check the existence of an element in a JSON object given a JSON pointer
@@ -2904,9 +4153,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     bool contains(const typename ::nlohmann::json_pointer<BasicJsonType>& ptr) const
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return ptr.contains(this);
     }
+#endif
 
     /// @}
 
@@ -3017,9 +4270,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     ///             that is, replace `json::iterator_wrapper(j)` with `j.items()`.
     JSON_HEDLEY_DEPRECATED_FOR(3.1.0, items())
     static iteration_proxy<iterator> iterator_wrapper(reference ref) noexcept
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
         return ref.items();
     }
+#endif
 
     /// @brief wrapper to access iterator member functions in range-based for
     /// @sa https://json.nlohmann.me/api/basic_json/items/
@@ -3028,9 +4285,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     ///         that is, replace `json::iterator_wrapper(j)` with `j.items()`.
     JSON_HEDLEY_DEPRECATED_FOR(3.1.0, items())
     static iteration_proxy<const_iterator> iterator_wrapper(const_reference ref) noexcept
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
         return ref.items();
     }
+#endif
 
     /// @brief helper to access iterator member functions in range-based for
     /// @sa https://json.nlohmann.me/api/basic_json/items/
@@ -3218,6 +4479,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             case value_t::binary:
             {
                 m_data.m_value.binary->clear();
+                m_data.m_value.binary->clear_subtype();
                 break;
             }
 
@@ -3247,15 +4509,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // push_back only works for null objects or arrays
         if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_array())))
         {
-            JSON_THROW(type_error::create(308, detail::concat("cannot use push_back() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::push_back_wrong_type, "push_back()", *this);
         }
 
         // transform a null object into an array
         if (is_null())
         {
-            m_data.m_type = value_t::array;
-            m_data.m_value = value_t::array;
-            assert_invariant();
+            convert_null_to<array_t>();
         }
 
         // add the element to the array (move semantics)
@@ -3280,15 +4540,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // push_back only works for null objects or arrays
         if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_array())))
         {
-            JSON_THROW(type_error::create(308, detail::concat("cannot use push_back() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::push_back_wrong_type, "push_back()", *this);
         }
 
         // transform a null object into an array
         if (is_null())
         {
-            m_data.m_type = value_t::array;
-            m_data.m_value = value_t::array;
-            assert_invariant();
+            convert_null_to<array_t>();
         }
 
         // add the element to the array
@@ -3312,15 +4570,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // push_back only works for null objects or objects
         if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_object())))
         {
-            JSON_THROW(type_error::create(308, detail::concat("cannot use push_back() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::push_back_wrong_type, "push_back()", *this);
         }
 
         // transform a null object into an object
         if (is_null())
         {
-            m_data.m_type = value_t::object;
-            m_data.m_value = value_t::object;
-            assert_invariant();
+            convert_null_to<object_t>();
         }
 
         // add the element to the object
@@ -3368,15 +4624,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // emplace_back only works for null objects or arrays
         if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_array())))
         {
-            JSON_THROW(type_error::create(311, detail::concat("cannot use emplace_back() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::emplace_wrong_type, "emplace_back()", *this);
         }
 
         // transform a null object into an array
         if (is_null())
         {
-            m_data.m_type = value_t::array;
-            m_data.m_value = value_t::array;
-            assert_invariant();
+            convert_null_to<array_t>();
         }
 
         // add the element to the array (perfect forwarding)
@@ -3393,15 +4647,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // emplace only works for null objects or arrays
         if (JSON_HEDLEY_UNLIKELY(!(is_null() || is_object())))
         {
-            JSON_THROW(type_error::create(311, detail::concat("cannot use emplace() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::emplace_wrong_type, "emplace()", *this);
         }
 
         // transform a null object into an object
         if (is_null())
         {
-            m_data.m_type = value_t::object;
-            m_data.m_value = value_t::object;
-            assert_invariant();
+            convert_null_to<object_t>();
         }
 
         // add the element to the array (perfect forwarding)
@@ -3447,21 +4699,36 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             // check if iterator pos fits to this JSON value
             if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
             {
-                JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+                JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterator does not fit current value", this));
             }
 
             // insert to array and return iterator
             return insert_iterator(pos, val);
         }
 
-        JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+        detail::throw_cannot_use_with(detail::exception_id::insert_wrong_type, "insert()", *this);
     }
 
     /// @brief inserts element into array
     /// @sa https://json.nlohmann.me/api/basic_json/insert/
     iterator insert(const_iterator pos, basic_json&& val) // NOLINT(performance-unnecessary-value-param)
     {
-        return insert(std::move(pos), val);
+        // insert only works for arrays
+        if (JSON_HEDLEY_LIKELY(is_array()))
+        {
+            // check if iterator pos fits to this JSON value
+            if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
+            {
+                JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterator does not fit current value", this));
+            }
+
+            // moving into a local first keeps this safe even if val aliases
+            // an element of this array
+            basic_json tmp(std::move(val));
+            return insert_iterator(pos, std::move(tmp));
+        }
+
+        detail::throw_cannot_use_with(detail::exception_id::insert_wrong_type, "insert()", *this);
     }
 
     /// @brief inserts copies of element into array
@@ -3474,14 +4741,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             // check if iterator pos fits to this JSON value
             if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
             {
-                JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+                JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterator does not fit current value", this));
             }
 
             // insert to array and return iterator
             return insert_iterator(pos, cnt, val);
         }
 
-        JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+        detail::throw_cannot_use_with(detail::exception_id::insert_wrong_type, "insert()", *this);
     }
 
     /// @brief inserts range of elements into array
@@ -3491,30 +4758,30 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // insert only works for arrays
         if (JSON_HEDLEY_UNLIKELY(!is_array()))
         {
-            JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::insert_wrong_type, "insert()", *this);
         }
 
         // check if iterator pos fits to this JSON value
         if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
         {
-            JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterator does not fit current value", this));
         }
 
         // check if range iterators belong to the same JSON object
         if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
         {
-            JSON_THROW(invalid_iterator::create(210, "iterators do not fit", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::insert_range_incompatible, "iterators do not fit", this));
         }
 
         if (JSON_HEDLEY_UNLIKELY(first.m_object == this))
         {
-            JSON_THROW(invalid_iterator::create(211, "passed iterators may not belong to container", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::insert_range_into_itself, "passed iterators may not belong to container", this));
         }
 
         // passed iterators must belong to arrays
         if (JSON_HEDLEY_UNLIKELY(!first.m_object->is_array()))
         {
-            JSON_THROW(invalid_iterator::create(202, "iterators first and last must point to arrays", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterators first and last must point to arrays", this));
         }
 
         // insert to array and return iterator
@@ -3528,17 +4795,25 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // insert only works for arrays
         if (JSON_HEDLEY_UNLIKELY(!is_array()))
         {
-            JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::insert_wrong_type, "insert()", *this);
         }
 
         // check if iterator pos fits to this JSON value
         if (JSON_HEDLEY_UNLIKELY(pos.m_object != this))
         {
-            JSON_THROW(invalid_iterator::create(202, "iterator does not fit current value", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterator does not fit current value", this));
+        }
+
+        // copy the values first: ilist may refer to elements of this array
+        array_t values;
+        detail::reserve_array(values, ilist.size(), detail::priority_tag<1> {});
+        for (const auto& element : ilist)
+        {
+            values.push_back(element.moved_or_copied());
         }
 
         // insert to array and return iterator
-        return insert_iterator(pos, ilist.begin(), ilist.end());
+        return insert_iterator(pos, std::make_move_iterator(values.begin()), std::make_move_iterator(values.end()));
     }
 
     /// @brief inserts range of elements into object
@@ -3548,19 +4823,19 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // insert only works for objects
         if (JSON_HEDLEY_UNLIKELY(!is_object()))
         {
-            JSON_THROW(type_error::create(309, detail::concat("cannot use insert() with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::insert_wrong_type, "insert()", *this);
         }
 
         // check if range iterators belong to the same JSON object
         if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
         {
-            JSON_THROW(invalid_iterator::create(210, "iterators do not fit", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::insert_range_incompatible, "iterators do not fit", this));
         }
 
         // passed iterators must belong to objects
         if (JSON_HEDLEY_UNLIKELY(!first.m_object->is_object()))
         {
-            JSON_THROW(invalid_iterator::create(202, "iterators first and last must point to objects", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::iterator_from_other_value, "iterators first and last must point to objects", this));
         }
 
         m_data.m_value.object->insert(first.m_it.object_iterator, last.m_it.object_iterator);
@@ -3571,73 +4846,197 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/update/
     void update(const_reference j, bool merge_objects = false)
     {
-        update(j.begin(), j.end(), merge_objects);
+        prepare_update();
+
+        // passed value must be an object (checked here so a type_error names
+        // j, not the copy made below)
+        if (JSON_HEDLEY_UNLIKELY(!j.is_object()))
+        {
+            detail::throw_cannot_use_with(detail::exception_id::update_wrong_type, "update()", j);
+        }
+
+        // copy first: j may be *this or one of its descendants, and is
+        // iterated (and moved from) below to update *this
+        basic_json source = j;
+        update_from(source, merge_objects);
     }
 
     /// @brief updates a JSON object from another object, overwriting existing keys
     /// @sa https://json.nlohmann.me/api/basic_json/update/
     void update(const_iterator first, const_iterator last, bool merge_objects = false) // NOLINT(performance-unnecessary-value-param)
     {
-        // implicitly convert a null value to an empty object
-        if (is_null())
-        {
-            m_data.m_type = value_t::object;
-            m_data.m_value.object = create<object_t>();
-            assert_invariant();
-        }
-
-        if (JSON_HEDLEY_UNLIKELY(!is_object()))
-        {
-            JSON_THROW(type_error::create(312, detail::concat("cannot use update() with ", type_name()), this));
-        }
+        prepare_update();
 
         // check if range iterators belong to the same JSON object
         if (JSON_HEDLEY_UNLIKELY(first.m_object != last.m_object))
         {
-            JSON_THROW(invalid_iterator::create(210, "iterators do not fit", this));
+            JSON_THROW(invalid_iterator::create(detail::exception_id::insert_range_incompatible, "iterators do not fit", this));
         }
 
         // passed iterators must belong to objects
         if (JSON_HEDLEY_UNLIKELY(!first.m_object->is_object()))
         {
-            JSON_THROW(type_error::create(312, detail::concat("cannot use update() with ", first.m_object->type_name()), first.m_object));
+            detail::throw_cannot_use_with(detail::exception_id::update_wrong_type, "update()", *first.m_object);
+        }
+
+        // copy first: the range may belong to *this or one of its
+        // descendants, and is iterated (and moved from) below to update
+        // *this
+        basic_json source(first, last);
+        update_from(source, merge_objects);
+    }
+
+  private:
+    /// @brief an object @ref update_members_iteratively or @ref
+    /// merge_patch_iteratively is merging into, and the members still to merge
+    struct merge_frame
+    {
+        merge_frame(basic_json* target_, iterator position_, iterator last_) noexcept
+            : target(target_), position(std::move(position_)), last(std::move(last_))
+        {}
+
+        basic_json* target;
+        iterator position;
+        iterator last;
+    };
+
+    /// @brief converts a null value to an empty object and checks that this
+    /// value is an object; called first by both @ref update overloads
+    void prepare_update()
+    {
+        // implicitly convert a null value to an empty object
+        if (is_null())
+        {
+            convert_null_to<object_t>();
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(!is_object()))
+        {
+            detail::throw_cannot_use_with(detail::exception_id::update_wrong_type, "update()", *this);
+        }
+    }
+
+    /// @brief starts the @ref update_members loop over an already-copied @a
+    /// source; called by both @ref update overloads
+    void update_from(basic_json& source, const bool merge_objects)
+    {
+        update_members(source.begin(), source.end(), merge_objects, 0);
+    }
+
+    /*!
+    @brief the members loop of @ref update, for this object and range
+
+    Merging a nested object calls this function again, once per nesting
+    level, so a value nested deeply enough used to exhaust the call stack and
+    terminate the process. The descent is bounded here: once @ref
+    detail::recursion_depth_limit levels have been entered, @ref
+    update_members_iteratively merges what is left without the call stack.
+
+    @param[in] depth  nesting level of this object, counted from the object
+                      @ref update was called on
+    */
+    void update_members(const iterator& first, const iterator& last, const bool merge_objects, const std::size_t depth)
+    {
+        if (JSON_HEDLEY_UNLIKELY(depth >= detail::recursion_depth_limit()))
+        {
+            update_members_iteratively(first, last);
+            return;
         }
 
         for (auto it = first; it != last; ++it)
         {
             if (merge_objects && it.value().is_object())
             {
-                auto it2 = m_data.m_value.object->find(it.key());
+                const auto it2 = m_data.m_value.object->find(it.key());
                 // Only recurse when the existing value is itself an object.
                 // Otherwise overwrite, matching the documented "all other values
                 // are overwritten as usual" behavior (see #5402).
                 if (it2 != m_data.m_value.object->end() && it2->second.is_object())
                 {
-                    it2->second.update(it.value(), true);
-#if JSON_DIAGNOSTICS
-                    it2->second.set_parents();
-#endif
+                    it2->second.update_members(it.value().begin(), it.value().end(), true, depth + 1);
                     continue;
                 }
             }
-            m_data.m_value.object->operator[](it.key()) = it.value();
-#if JSON_DIAGNOSTICS
-            m_data.m_value.object->operator[](it.key()).m_parent = this;
-#endif
+            // set_parent() also repairs the other members, which ordered_json
+            // relocates when adding a key makes its vector grow
+            set_parent(m_data.m_value.object->operator[](it.key()) = std::move(it.value()));
         }
     }
 
+    /*!
+    @brief merge @a first to @a last into this object without the call stack
+
+    Does the same as @ref update_members with `merge_objects` set, keeping the
+    objects whose merge was interrupted by a nested one on an explicit stack
+    instead of descending into them. A nested object is still merged
+    completely before the next member, in the same order as the recursive
+    version. Only reached for values nested deeper than @ref
+    detail::recursion_depth_limit.
+    */
+    void update_members_iteratively(iterator first, iterator last)
+    {
+        std::vector<merge_frame> stack;
+
+        basic_json* target = this;
+        while (true)
+        {
+            if (first == last)
+            {
+                if (stack.empty())
+                {
+                    break;
+                }
+
+                // a nested object is merged: continue with its parent
+                target = stack.back().target;
+                first = stack.back().position;
+                last = stack.back().last;
+                stack.pop_back();
+                continue;
+            }
+
+            if (first.value().is_object())
+            {
+                const auto it2 = target->m_data.m_value.object->find(first.key());
+                if (it2 != target->m_data.m_value.object->end() && it2->second.is_object())
+                {
+                    basic_json& source = first.value();
+                    ++first;
+                    stack.emplace_back(target, first, last);
+                    target = &it2->second;
+                    first = source.begin();
+                    last = source.end();
+                    continue;
+                }
+            }
+            // set_parent() also repairs the other members, which ordered_json
+            // relocates when adding a key makes its vector grow
+            target->set_parent(target->m_data.m_value.object->operator[](first.key()) = std::move(first.value()));
+            ++first;
+        }
+    }
+
+  public:
     /// @brief exchanges the values
     /// @sa https://json.nlohmann.me/api/basic_json/swap/
     void swap(reference other) noexcept (
         std::is_nothrow_move_constructible<value_t>::value&&
         std::is_nothrow_move_assignable<value_t>::value&&
         std::is_nothrow_move_constructible<json_value>::value&& // NOLINT(cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
-        std::is_nothrow_move_assignable<json_value>::value
+        std::is_nothrow_move_assignable<json_value>::value&&
+        std::is_nothrow_move_constructible<json_base_class_t>::value&&
+        std::is_nothrow_move_assignable<json_base_class_t>::value
     )
     {
         std::swap(m_data.m_type, other.m_data.m_type);
         std::swap(m_data.m_value, other.m_data.m_value);
+
+        // the custom base class travels with the value when it is copied or
+        // moved, so it is exchanged along with it
+        {
+            using std::swap;
+            swap(static_cast<json_base_class_t&>(*this), static_cast<json_base_class_t&>(other));
+        }
 
 #if JSON_DIAGNOSTIC_POSITIONS
         std::swap(start_position, other.start_position);
@@ -3655,7 +5054,9 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         std::is_nothrow_move_constructible<value_t>::value&&
         std::is_nothrow_move_assignable<value_t>::value&&
         std::is_nothrow_move_constructible<json_value>::value&& // NOLINT(cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
-        std::is_nothrow_move_assignable<json_value>::value
+        std::is_nothrow_move_assignable<json_value>::value&&
+        std::is_nothrow_move_constructible<json_base_class_t>::value&&
+        std::is_nothrow_move_assignable<json_base_class_t>::value
     )
     {
         left.swap(right);
@@ -3674,7 +5075,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
         else
         {
-            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(array_t&) with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::swap_wrong_type, "swap(array_t&)", *this);
         }
     }
 
@@ -3691,7 +5092,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
         else
         {
-            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(object_t&) with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::swap_wrong_type, "swap(object_t&)", *this);
         }
     }
 
@@ -3707,7 +5108,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
         else
         {
-            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(string_t&) with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::swap_wrong_type, "swap(string_t&)", *this);
         }
     }
 
@@ -3715,7 +5116,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/swap/
     void swap(binary_t& other) // NOLINT(bugprone-exception-escape,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
     {
-        // swap only works for strings
+        // swap only works for binary values
         if (JSON_HEDLEY_LIKELY(is_binary()))
         {
             using std::swap;
@@ -3723,7 +5124,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
         else
         {
-            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(binary_t&) with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::swap_wrong_type, "swap(binary_t&)", *this);
         }
     }
 
@@ -3731,7 +5132,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/swap/
     void swap(typename binary_t::container_type& other) // NOLINT(bugprone-exception-escape)
     {
-        // swap only works for strings
+        // swap only works for binary values
         if (JSON_HEDLEY_LIKELY(is_binary()))
         {
             using std::swap;
@@ -3739,7 +5140,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         }
         else
         {
-            JSON_THROW(type_error::create(310, detail::concat("cannot use swap(binary_t::container_type&) with ", type_name()), this));
+            detail::throw_cannot_use_with(detail::exception_id::swap_wrong_type, "swap(binary_t::container_type&)", *this);
         }
     }
 
@@ -3760,7 +5161,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     // because any negative signed value is smaller than any unsigned value.
     // Otherwise, the non-negative signed value is cast to unsigned before the
     // comparison to avoid wraparound.
-#define JSON_IMPLEMENT_OPERATOR(op, null_result, unordered_result, default_result)                       \
+#define JSON_IMPLEMENT_OPERATOR(op, null_result, unordered_result, default_result, deep_result, may_descend) \
     const auto lhs_type = lhs.type();                                                                    \
     const auto rhs_type = rhs.type();                                                                    \
     \
@@ -3769,11 +5170,25 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         switch (lhs_type)                                                                                \
         {                                                                                                \
             case value_t::array:                                                                         \
+            {                                                                                            \
+                if (JSON_HEDLEY_UNLIKELY(nesting_depth_exhausted(may_descend)))                        \
+                {                                                                                        \
+                    return (deep_result);                                                                \
+                }                                                                                        \
+                const nesting_depth_guard guard;                                                         \
                 return (*lhs.m_data.m_value.array) op (*rhs.m_data.m_value.array);                                     \
-                \
+            }                                                                                            \
+            \
             case value_t::object:                                                                        \
+            {                                                                                            \
+                if (JSON_HEDLEY_UNLIKELY(nesting_depth_exhausted(may_descend)))                        \
+                {                                                                                        \
+                    return (deep_result);                                                                \
+                }                                                                                        \
+                const nesting_depth_guard guard;                                                         \
                 return (*lhs.m_data.m_value.object) op (*rhs.m_data.m_value.object);                                   \
-                \
+            }                                                                                            \
+            \
             case value_t::null:                                                                          \
                 return (null_result);                                                                    \
                 \
@@ -3873,7 +5288,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         JSON_HEDLEY_PRAGMA(GCC diagnostic ignored "-Wfloat-equal")
 #endif
         const_reference lhs = *this;
-        JSON_IMPLEMENT_OPERATOR( ==, true, false, false)
+        JSON_IMPLEMENT_OPERATOR( ==, true, false, false,
+                                 compare_iteratively<false>(lhs, rhs, false) == compare_result::equal, true)
 #ifdef __GNUC__
         JSON_HEDLEY_DIAGNOSTIC_POP
 #endif
@@ -3883,7 +5299,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
     template<typename ScalarType>
     requires std::is_scalar_v<ScalarType>
-    bool operator==(ScalarType rhs) const noexcept
+    bool operator==(ScalarType rhs) const noexcept(std::is_nothrow_constructible<basic_json, ScalarType>::value)
     {
         return *this == basic_json(rhs);
     }
@@ -3898,14 +5314,15 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         JSON_IMPLEMENT_OPERATOR(<=>, // *NOPAD*
                                 std::partial_ordering::equivalent,
                                 std::partial_ordering::unordered,
-                                lhs_type <=> rhs_type) // *NOPAD*
+                                lhs_type <=> rhs_type, // *NOPAD*
+                                to_partial_ordering(compare_iteratively<true>(lhs, rhs, false)), true)
     }
 
     /// @brief comparison: 3-way
     /// @sa https://json.nlohmann.me/api/basic_json/operator_spaceship/
     template<typename ScalarType>
     requires std::is_scalar_v<ScalarType>
-    std::partial_ordering operator<=>(ScalarType rhs) const noexcept // *NOPAD*
+    std::partial_ordering operator<=>(ScalarType rhs) const noexcept(std::is_nothrow_constructible<basic_json, ScalarType>::value) // *NOPAD*
     {
         return *this <=> basic_json(rhs); // *NOPAD*
     }
@@ -3930,7 +5347,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
     template<typename ScalarType>
     requires std::is_scalar_v<ScalarType>
-    bool operator<=(ScalarType rhs) const noexcept
+    bool operator<=(ScalarType rhs) const noexcept(std::is_nothrow_constructible<basic_json, ScalarType>::value)
     {
         return *this <= basic_json(rhs);
     }
@@ -3951,9 +5368,30 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
     template<typename ScalarType>
     requires std::is_scalar_v<ScalarType>
-    bool operator>=(ScalarType rhs) const noexcept
+    bool operator>=(ScalarType rhs) const noexcept(std::is_nothrow_constructible<basic_json, ScalarType>::value)
     {
         return *this >= basic_json(rhs);
+    }
+
+    // a scalar on the left-hand side would otherwise select the candidate
+    // rewritten from operator<=>, which does not emulate the legacy behavior
+
+    /// @brief comparison: less than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
+    template<typename ScalarType>
+    requires std::is_scalar_v<ScalarType>
+    friend bool operator<=(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
+    {
+        return basic_json(lhs) <= rhs;
+    }
+
+    /// @brief comparison: greater than or equal
+    /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
+    template<typename ScalarType>
+    requires std::is_scalar_v<ScalarType>
+    friend bool operator>=(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
+    {
+        return basic_json(lhs) >= rhs;
     }
 #endif
 #else
@@ -3965,17 +5403,23 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         JSON_HEDLEY_DIAGNOSTIC_PUSH
         JSON_HEDLEY_PRAGMA(GCC diagnostic ignored "-Wfloat-equal")
 #endif
-        JSON_IMPLEMENT_OPERATOR( ==, true, false, false)
+        JSON_IMPLEMENT_OPERATOR( ==, true, false, false,
+                                 compare_iteratively<false>(lhs, rhs, false) == compare_result::equal, true)
 #ifdef __GNUC__
         JSON_HEDLEY_DIAGNOSTIC_POP
 #endif
     }
 
+    // The friend comparisons with a scalar name the JSON type via decltype of
+    // their parameter in noexcept, because older MSVC versions do not see the
+    // class scope there: MSVC 2015 and 2017 take basic_json as the template,
+    // and MSVC 2019 16.0 rejects member types and template parameters.
+
     /// @brief comparison: equal
     /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator==(const_reference lhs, ScalarType rhs) noexcept
+    friend bool operator==(const_reference lhs, ScalarType rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(lhs)>, ScalarType>::value)
     {
         return lhs == basic_json(rhs);
     }
@@ -3984,7 +5428,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_eq/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator==(ScalarType lhs, const_reference rhs) noexcept
+    friend bool operator==(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
     {
         return basic_json(lhs) == rhs;
     }
@@ -4000,7 +5444,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator!=(const_reference lhs, ScalarType rhs) noexcept
+    friend bool operator!=(const_reference lhs, ScalarType rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(lhs)>, ScalarType>::value)
     {
         return lhs != basic_json(rhs);
     }
@@ -4009,7 +5453,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ne/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator!=(ScalarType lhs, const_reference rhs) noexcept
+    friend bool operator!=(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
     {
         return basic_json(lhs) != rhs;
     }
@@ -4021,14 +5465,15 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // default_result is used if we cannot compare values. In that case,
         // we compare types. Note we have to call the operator explicitly,
         // because MSVC has problems otherwise.
-        JSON_IMPLEMENT_OPERATOR( <, false, false, operator<(lhs_type, rhs_type))
+        JSON_IMPLEMENT_OPERATOR( <, false, false, operator<(lhs_type, rhs_type),
+                                 compare_iteratively<true>(lhs, rhs, true) == compare_result::less, false)
     }
 
     /// @brief comparison: less than
     /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator<(const_reference lhs, ScalarType rhs) noexcept
+    friend bool operator<(const_reference lhs, ScalarType rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(lhs)>, ScalarType>::value)
     {
         return lhs < basic_json(rhs);
     }
@@ -4037,7 +5482,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_lt/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator<(ScalarType lhs, const_reference rhs) noexcept
+    friend bool operator<(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
     {
         return basic_json(lhs) < rhs;
     }
@@ -4057,7 +5502,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator<=(const_reference lhs, ScalarType rhs) noexcept
+    friend bool operator<=(const_reference lhs, ScalarType rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(lhs)>, ScalarType>::value)
     {
         return lhs <= basic_json(rhs);
     }
@@ -4066,7 +5511,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_le/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator<=(ScalarType lhs, const_reference rhs) noexcept
+    friend bool operator<=(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
     {
         return basic_json(lhs) <= rhs;
     }
@@ -4087,7 +5532,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator>(const_reference lhs, ScalarType rhs) noexcept
+    friend bool operator>(const_reference lhs, ScalarType rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(lhs)>, ScalarType>::value)
     {
         return lhs > basic_json(rhs);
     }
@@ -4096,7 +5541,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_gt/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator>(ScalarType lhs, const_reference rhs) noexcept
+    friend bool operator>(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
     {
         return basic_json(lhs) > rhs;
     }
@@ -4116,7 +5561,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator>=(const_reference lhs, ScalarType rhs) noexcept
+    friend bool operator>=(const_reference lhs, ScalarType rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(lhs)>, ScalarType>::value)
     {
         return lhs >= basic_json(rhs);
     }
@@ -4125,7 +5570,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/operator_ge/
     template<typename ScalarType, typename std::enable_if<
                  std::is_scalar<ScalarType>::value, int>::type = 0>
-    friend bool operator>=(ScalarType lhs, const_reference rhs) noexcept
+    friend bool operator>=(ScalarType lhs, const_reference rhs) noexcept(std::is_nothrow_constructible<detail::uncvref_t<decltype(rhs)>, ScalarType>::value)
     {
         return basic_json(lhs) >= rhs;
     }
@@ -4143,7 +5588,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @{
 #ifndef JSON_NO_IO
     /// @brief serialize to stream
-    /// @sa https://json.nlohmann.me/api/basic_json/operator_ltlt/
+    /// @sa https://json.nlohmann.me/api/operator_ltlt/
     friend std::ostream& operator<<(std::ostream& o, const basic_json& j)
     {
         // read width member and use it as the indentation parameter if nonzero
@@ -4161,8 +5606,11 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         return o;
     }
 
+#if !JSON_DELETE_DEPRECATED_FUNCTIONS
+    // the deleted version is a function template after the class, because
+    // GCC < 5 and Clang < 10 reject deleted friend functions in class templates
     /// @brief serialize to stream
-    /// @sa https://json.nlohmann.me/api/basic_json/operator_ltlt/
+    /// @sa https://json.nlohmann.me/api/operator_ltlt/
     /// @deprecated This function is deprecated since 3.0.0 and will be removed in
     ///             version 4.0.0 of the library. Please use
     ///             operator<<(std::ostream&, const basic_json&) instead; that is,
@@ -4172,6 +5620,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     {
         return o << j;
     }
+#endif
 #endif  // JSON_NO_IO
     /// @}
 
@@ -4193,7 +5642,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                             const bool ignore_trailing_commas = false)
     {
         basic_json result;
-        parser(detail::input_adapter(std::forward<InputType>(i)), std::move(cb), allow_exceptions, ignore_comments, ignore_trailing_commas).parse(true, result); // cppcheck-suppress[accessMoved,accessForwarded]
+        auto p = parser(detail::input_adapter(std::forward<InputType>(i)), std::move(cb), allow_exceptions, ignore_comments, ignore_trailing_commas);
+        p.parse(true, result);
         return result;
     }
 
@@ -4210,7 +5660,8 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                             const bool ignore_trailing_commas = false)
     {
         basic_json result;
-        parser(detail::input_adapter(std::move(first), std::move(last)), std::move(cb), allow_exceptions, ignore_comments, ignore_trailing_commas).parse(true, result); // cppcheck-suppress[accessMoved]
+        auto p = parser(detail::input_adapter(std::move(first), std::move(last)), std::move(cb), allow_exceptions, ignore_comments, ignore_trailing_commas);
+        p.parse(true, result);
         return result;
     }
 
@@ -4221,11 +5672,16 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                             const bool allow_exceptions = true,
                             const bool ignore_comments = false,
                             const bool ignore_trailing_commas = false)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
         basic_json result;
-        parser(i.get(), std::move(cb), allow_exceptions, ignore_comments, ignore_trailing_commas).parse(true, result); // cppcheck-suppress[accessMoved]
+        auto p = parser(i.get(), std::move(cb), allow_exceptions, ignore_comments, ignore_trailing_commas);
+        p.parse(true, result);
         return result;
     }
+#endif
 
     /// @brief check if the input is valid JSON
     /// @sa https://json.nlohmann.me/api/basic_json/accept/
@@ -4255,9 +5711,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static bool accept(detail::span_input_adapter&& i,
                        const bool ignore_comments = false,
                        const bool ignore_trailing_commas = false)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
         return parser(i.get(), nullptr, false, ignore_comments, ignore_trailing_commas, true).accept(true);
     }
+#endif
 
     /// @brief generate SAX events
     /// @sa https://json.nlohmann.me/api/basic_json/sax_parse/
@@ -4267,12 +5727,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                           input_format_t format = input_format_t::json,
                           const bool strict = true,
                           const bool ignore_comments = false,
-                          const bool ignore_trailing_commas = false)
+                          const bool ignore_trailing_commas = false,
+                          const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
     {
         auto ia = detail::input_adapter(std::forward<InputType>(i));
         return format == input_format_t::json
                ? parser(std::move(ia), nullptr, true, ignore_comments, ignore_trailing_commas).sax_parse(sax, strict)
-               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(format, sax, strict);
+               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(sax, strict, tag_handler);
     }
 
     /// @brief generate SAX events (iterator pair, or iterator+sentinel pair for C++20 ranges support)
@@ -4284,12 +5745,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                           input_format_t format = input_format_t::json,
                           const bool strict = true,
                           const bool ignore_comments = false,
-                          const bool ignore_trailing_commas = false)
+                          const bool ignore_trailing_commas = false,
+                          const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
     {
         auto ia = detail::input_adapter(std::move(first), std::move(last));
         return format == input_format_t::json
                ? parser(std::move(ia), nullptr, true, ignore_comments, ignore_trailing_commas).sax_parse(sax, strict)
-               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(format, sax, strict);
+               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(sax, strict, tag_handler);
     }
 
     /// @brief generate SAX events
@@ -4297,6 +5759,19 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @deprecated This function is deprecated since 3.8.0 and will be removed in
     ///             version 4.0.0 of the library. Please use
     ///             sax_parse(ptr, ptr + len) instead.
+    //
+    // Clang reports "declaration is marked with '@deprecated' command but does
+    // not have a deprecation attribute" for this overload even though
+    // JSON_HEDLEY_DEPRECATED_FOR below does expand to __attribute__((deprecated));
+    // isolated reproductions of this exact declaration shape (doc comment,
+    // template<>, two stacked __attribute__ lines, an overload set of the same
+    // name) do not reproduce it, so this looks like a Clang comment/declaration
+    // association quirk specific to this overload within basic_json, not a
+    // genuine documentation bug. See #5725 item 2.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdocumentation-deprecated-sync"
+#endif
     template <typename SAX>
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, sax_parse(ptr, ptr + len, ...))
     JSON_HEDLEY_NON_NULL(2)
@@ -4304,18 +5779,29 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                           input_format_t format = input_format_t::json,
                           const bool strict = true,
                           const bool ignore_comments = false,
-                          const bool ignore_trailing_commas = false)
+                          const bool ignore_trailing_commas = false,
+                          const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         auto ia = i.get();
         return format == input_format_t::json
                // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
                ? parser(std::move(ia), nullptr, true, ignore_comments, ignore_trailing_commas).sax_parse(sax, strict)
                // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(format, sax, strict);
+               : detail::binary_reader<basic_json, decltype(ia), SAX>(std::move(ia), format).sax_parse(sax, strict, tag_handler);
     }
+#endif
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #ifndef JSON_NO_IO
+#if !JSON_DELETE_DEPRECATED_FUNCTIONS
+    // the deleted version is a function template after the class, because
+    // GCC < 5 and Clang < 10 reject deleted friend functions in class templates
     /// @brief deserialize from stream
-    /// @sa https://json.nlohmann.me/api/basic_json/operator_gtgt/
+    /// @sa https://json.nlohmann.me/api/operator_gtgt/
     /// @deprecated This stream operator is deprecated since 3.0.0 and will be removed in
     ///             version 4.0.0 of the library. Please use
     ///             operator>>(std::istream&, basic_json&) instead; that is,
@@ -4325,12 +5811,16 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     {
         return operator>>(i, j);
     }
+#endif
 
     /// @brief deserialize from stream
-    /// @sa https://json.nlohmann.me/api/basic_json/operator_gtgt/
+    /// @sa https://json.nlohmann.me/api/operator_gtgt/
     friend std::istream& operator>>(std::istream& i, basic_json& j)
     {
-        parser(detail::input_adapter(i)).parse(false, j);
+        // parse into a temporary so that j is left unchanged if parsing fails
+        basic_json result;
+        parser(detail::input_adapter(i)).parse(false, result);
+        j = std::move(result);
         return i;
     }
 #endif  // JSON_NO_IO
@@ -4431,6 +5921,32 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     }
 #endif
 
+  private:
+    /*!
+    @brief shared implementation of the binary from_cbor/from_msgpack/
+           from_ubjson/from_bjdata/from_bon8/from_bson overloads
+
+    Building the @ref binary_reader as a named local, rather than as a
+    temporary that @ref detail::json_sax_dom_parser::parse is called on in
+    the same expression, avoids a false-positive cppcheck accessMoved
+    warning in each of the 16 callers.
+    */
+    template<typename InputAdapterType>
+    static basic_json from_binary_impl(InputAdapterType ia, const input_format_t format,
+                                       const bool strict, const bool allow_exceptions,
+                                       const error_handler_t error_handler = error_handler_t::keep,
+                                       const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
+    {
+        basic_json result;
+        detail::json_sax_dom_parser<basic_json, InputAdapterType> sdp(result, allow_exceptions);
+        binary_reader<InputAdapterType> reader(std::move(ia), format, error_handler);
+        if (!reader.sax_parse(&sdp, strict, tag_handler))
+        {
+            result = value_t::discarded;
+        }
+        return result;
+    }
+
     //////////////////////////////////////////
     // binary serialization/deserialization //
     //////////////////////////////////////////
@@ -4441,75 +5957,87 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
   public:
     /// @brief create a CBOR serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_cbor/
-    static std::vector<std::uint8_t> to_cbor(const basic_json& j)
+    static std::vector<std::uint8_t> to_cbor(const basic_json& j,
+            const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
         std::vector<std::uint8_t> result;
-        to_cbor(j, result);
+        result.reserve(detail::binary_reserve_hint(j));
+        vector_writer(result, error_handler).write_cbor(j);
         return result;
     }
 
     /// @brief create a CBOR serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_cbor/
-    static void to_cbor(const basic_json& j, detail::output_adapter<std::uint8_t> o)
+    static void to_cbor(const basic_json& j, detail::output_adapter<std::uint8_t> o,
+                        const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<std::uint8_t>(o).write_cbor(j);
+        binary_writer<std::uint8_t>(o, error_handler).write_cbor(j);
     }
 
     /// @brief create a CBOR serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_cbor/
-    static void to_cbor(const basic_json& j, detail::output_adapter<char> o)
+    static void to_cbor(const basic_json& j, detail::output_adapter<char> o,
+                        const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<char>(o).write_cbor(j);
+        binary_writer<char>(o, error_handler).write_cbor(j);
     }
 
     /// @brief create a MessagePack serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_msgpack/
-    static std::vector<std::uint8_t> to_msgpack(const basic_json& j)
+    static std::vector<std::uint8_t> to_msgpack(const basic_json& j,
+            const error_handler_t error_handler = error_handler_t::keep)
     {
         std::vector<std::uint8_t> result;
-        to_msgpack(j, result);
+        result.reserve(detail::binary_reserve_hint(j));
+        vector_writer(result, error_handler).write_msgpack(j);
         return result;
     }
 
     /// @brief create a MessagePack serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_msgpack/
-    static void to_msgpack(const basic_json& j, detail::output_adapter<std::uint8_t> o)
+    static void to_msgpack(const basic_json& j, detail::output_adapter<std::uint8_t> o,
+                           const error_handler_t error_handler = error_handler_t::keep)
     {
-        binary_writer<std::uint8_t>(o).write_msgpack(j);
+        binary_writer<std::uint8_t>(o, error_handler).write_msgpack(j);
     }
 
     /// @brief create a MessagePack serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_msgpack/
-    static void to_msgpack(const basic_json& j, detail::output_adapter<char> o)
+    static void to_msgpack(const basic_json& j, detail::output_adapter<char> o,
+                           const error_handler_t error_handler = error_handler_t::keep)
     {
-        binary_writer<char>(o).write_msgpack(j);
+        binary_writer<char>(o, error_handler).write_msgpack(j);
     }
 
     /// @brief create a UBJSON serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_ubjson/
     static std::vector<std::uint8_t> to_ubjson(const basic_json& j,
             const bool use_size = false,
-            const bool use_type = false)
+            const bool use_type = false,
+            const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
         std::vector<std::uint8_t> result;
-        to_ubjson(j, result, use_size, use_type);
+        result.reserve(detail::binary_reserve_hint(j));
+        vector_writer(result, error_handler).write_ubjson(j, use_size, use_type);
         return result;
     }
 
     /// @brief create a UBJSON serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_ubjson/
     static void to_ubjson(const basic_json& j, detail::output_adapter<std::uint8_t> o,
-                          const bool use_size = false, const bool use_type = false)
+                          const bool use_size = false, const bool use_type = false,
+                          const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<std::uint8_t>(o).write_ubjson(j, use_size, use_type);
+        binary_writer<std::uint8_t>(o, error_handler).write_ubjson(j, use_size, use_type);
     }
 
     /// @brief create a UBJSON serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_ubjson/
     static void to_ubjson(const basic_json& j, detail::output_adapter<char> o,
-                          const bool use_size = false, const bool use_type = false)
+                          const bool use_size = false, const bool use_type = false,
+                          const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<char>(o).write_ubjson(j, use_size, use_type);
+        binary_writer<char>(o, error_handler).write_ubjson(j, use_size, use_type);
     }
 
     /// @brief create a BJData serialization of a given JSON value
@@ -4517,10 +6045,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static std::vector<std::uint8_t> to_bjdata(const basic_json& j,
             const bool use_size = false,
             const bool use_type = false,
-            const bjdata_version_t version = bjdata_version_t::draft2)
+            const bjdata_version_t version = bjdata_version_t::draft2,
+            const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
         std::vector<std::uint8_t> result;
-        to_bjdata(j, result, use_size, use_type, version);
+        result.reserve(detail::binary_reserve_hint(j));
+        vector_writer(result, error_handler).write_ubjson(j, use_size, use_type, true, true, version);
         return result;
     }
 
@@ -4528,41 +6058,71 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/to_bjdata/
     static void to_bjdata(const basic_json& j, detail::output_adapter<std::uint8_t> o,
                           const bool use_size = false, const bool use_type = false,
-                          const bjdata_version_t version = bjdata_version_t::draft2)
+                          const bjdata_version_t version = bjdata_version_t::draft2,
+                          const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<std::uint8_t>(o).write_ubjson(j, use_size, use_type, true, true, version);
+        binary_writer<std::uint8_t>(o, error_handler).write_ubjson(j, use_size, use_type, true, true, version);
     }
 
     /// @brief create a BJData serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_bjdata/
     static void to_bjdata(const basic_json& j, detail::output_adapter<char> o,
                           const bool use_size = false, const bool use_type = false,
-                          const bjdata_version_t version = bjdata_version_t::draft2)
+                          const bjdata_version_t version = bjdata_version_t::draft2,
+                          const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<char>(o).write_ubjson(j, use_size, use_type, true, true, version);
+        binary_writer<char>(o, error_handler).write_ubjson(j, use_size, use_type, true, true, version);
     }
 
     /// @brief create a BSON serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_bson/
-    static std::vector<std::uint8_t> to_bson(const basic_json& j)
+    static std::vector<std::uint8_t> to_bson(const basic_json& j,
+            const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
         std::vector<std::uint8_t> result;
-        to_bson(j, result);
+        result.reserve(detail::binary_reserve_hint(j));
+        vector_writer(result, error_handler).write_bson(j);
         return result;
     }
 
     /// @brief create a BSON serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_bson/
-    static void to_bson(const basic_json& j, detail::output_adapter<std::uint8_t> o)
+    static void to_bson(const basic_json& j, detail::output_adapter<std::uint8_t> o,
+                        const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<std::uint8_t>(o).write_bson(j);
+        binary_writer<std::uint8_t>(o, error_handler).write_bson(j);
     }
 
     /// @brief create a BSON serialization of a given JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/to_bson/
-    static void to_bson(const basic_json& j, detail::output_adapter<char> o)
+    static void to_bson(const basic_json& j, detail::output_adapter<char> o,
+                        const error_handler_t error_handler = detail::binary_writer_default_error_handler())
     {
-        binary_writer<char>(o).write_bson(j);
+        binary_writer<char>(o, error_handler).write_bson(j);
+    }
+
+    /// @brief create a BON8 serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_bon8/
+    static std::vector<std::uint8_t> to_bon8(const basic_json& j)
+    {
+        std::vector<std::uint8_t> result;
+        result.reserve(detail::binary_reserve_hint(j));
+        vector_writer(result).write_bon8(j);
+        return result;
+    }
+
+    /// @brief create a BON8 serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_bon8/
+    static void to_bon8(const basic_json& j, detail::output_adapter<std::uint8_t> o)
+    {
+        binary_writer<std::uint8_t>(o).write_bon8(j);
+    }
+
+    /// @brief create a BON8 serialization of a given JSON value
+    /// @sa https://json.nlohmann.me/api/basic_json/to_bon8/
+    static void to_bon8(const basic_json& j, detail::output_adapter<char> o)
+    {
+        binary_writer<char>(o).write_bon8(j);
     }
 
     /// @brief create a JSON value from an input in CBOR format
@@ -4572,16 +6132,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json from_cbor(InputType&& i,
                                 const bool strict = true,
                                 const bool allow_exceptions = true,
-                                const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
+                                const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error,
+                                const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::forward<InputType>(i));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::cbor).sax_parse(input_format_t::cbor, &sdp, strict, tag_handler)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::forward<InputType>(i)), input_format_t::cbor, strict, allow_exceptions, error_handler, tag_handler);
     }
 
     /// @brief create a JSON value from an input in CBOR format (iterator pair, or iterator+sentinel pair for C++20 ranges support)
@@ -4592,16 +6146,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json from_cbor(IteratorType first, SentinelType last,
                                 const bool strict = true,
                                 const bool allow_exceptions = true,
-                                const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
+                                const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error,
+                                const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::move(first), std::move(last));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::cbor).sax_parse(input_format_t::cbor, &sdp, strict, tag_handler)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::move(first), std::move(last)), input_format_t::cbor, strict, allow_exceptions, error_handler, tag_handler);
     }
 
     template<typename T>
@@ -4611,9 +6159,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                                 const bool strict = true,
                                 const bool allow_exceptions = true,
                                 const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return from_cbor(ptr, ptr + len, strict, allow_exceptions, tag_handler);
     }
+#endif
 
     JSON_HEDLEY_WARN_UNUSED_RESULT
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, from_cbor(ptr, ptr + len))
@@ -4621,17 +6173,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                                 const bool strict = true,
                                 const bool allow_exceptions = true,
                                 const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
-        basic_json result;
-        auto ia = i.get();
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::cbor).sax_parse(input_format_t::cbor, &sdp, strict, tag_handler)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(i.get(), input_format_t::cbor, strict, allow_exceptions, error_handler_t::keep, tag_handler);
     }
+#endif
 
     /// @brief create a JSON value from an input in MessagePack format
     /// @sa https://json.nlohmann.me/api/basic_json/from_msgpack/
@@ -4639,16 +6187,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_msgpack(InputType&& i,
                                    const bool strict = true,
-                                   const bool allow_exceptions = true)
+                                   const bool allow_exceptions = true,
+                                   const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::forward<InputType>(i));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::msgpack).sax_parse(input_format_t::msgpack, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::forward<InputType>(i)), input_format_t::msgpack, strict, allow_exceptions, error_handler);
     }
 
     /// @brief create a JSON value from an input in MessagePack format (iterator pair, or iterator+sentinel pair for C++20 ranges support)
@@ -4658,16 +6200,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_msgpack(IteratorType first, SentinelType last,
                                    const bool strict = true,
-                                   const bool allow_exceptions = true)
+                                   const bool allow_exceptions = true,
+                                   const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::move(first), std::move(last));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::msgpack).sax_parse(input_format_t::msgpack, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::move(first), std::move(last)), input_format_t::msgpack, strict, allow_exceptions, error_handler);
     }
 
     template<typename T>
@@ -4676,26 +6212,26 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json from_msgpack(const T* ptr, std::size_t len,
                                    const bool strict = true,
                                    const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return from_msgpack(ptr, ptr + len, strict, allow_exceptions);
     }
+#endif
 
     JSON_HEDLEY_WARN_UNUSED_RESULT
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, from_msgpack(ptr, ptr + len))
     static basic_json from_msgpack(detail::span_input_adapter&& i,
                                    const bool strict = true,
                                    const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
-        basic_json result;
-        auto ia = i.get();
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::msgpack).sax_parse(input_format_t::msgpack, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(i.get(), input_format_t::msgpack, strict, allow_exceptions);
     }
+#endif
 
     /// @brief create a JSON value from an input in UBJSON format
     /// @sa https://json.nlohmann.me/api/basic_json/from_ubjson/
@@ -4703,16 +6239,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_ubjson(InputType&& i,
                                   const bool strict = true,
-                                  const bool allow_exceptions = true)
+                                  const bool allow_exceptions = true,
+                                  const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::forward<InputType>(i));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::ubjson).sax_parse(input_format_t::ubjson, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::forward<InputType>(i)), input_format_t::ubjson, strict, allow_exceptions, error_handler);
     }
 
     /// @brief create a JSON value from an input in UBJSON format (iterator pair, or iterator+sentinel pair for C++20 ranges support)
@@ -4722,16 +6252,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_ubjson(IteratorType first, SentinelType last,
                                   const bool strict = true,
-                                  const bool allow_exceptions = true)
+                                  const bool allow_exceptions = true,
+                                  const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::move(first), std::move(last));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::ubjson).sax_parse(input_format_t::ubjson, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::move(first), std::move(last)), input_format_t::ubjson, strict, allow_exceptions, error_handler);
     }
 
     template<typename T>
@@ -4740,26 +6264,26 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json from_ubjson(const T* ptr, std::size_t len,
                                   const bool strict = true,
                                   const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return from_ubjson(ptr, ptr + len, strict, allow_exceptions);
     }
+#endif
 
     JSON_HEDLEY_WARN_UNUSED_RESULT
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, from_ubjson(ptr, ptr + len))
     static basic_json from_ubjson(detail::span_input_adapter&& i,
                                   const bool strict = true,
                                   const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
-        basic_json result;
-        auto ia = i.get();
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::ubjson).sax_parse(input_format_t::ubjson, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(i.get(), input_format_t::ubjson, strict, allow_exceptions);
     }
+#endif
 
     /// @brief create a JSON value from an input in BJData format
     /// @sa https://json.nlohmann.me/api/basic_json/from_bjdata/
@@ -4767,16 +6291,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_bjdata(InputType&& i,
                                   const bool strict = true,
-                                  const bool allow_exceptions = true)
+                                  const bool allow_exceptions = true,
+                                  const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::forward<InputType>(i));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::bjdata).sax_parse(input_format_t::bjdata, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::forward<InputType>(i)), input_format_t::bjdata, strict, allow_exceptions, error_handler);
     }
 
     /// @brief create a JSON value from an input in BJData format (iterator pair, or iterator+sentinel pair for C++20 ranges support)
@@ -4786,17 +6304,62 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_bjdata(IteratorType first, SentinelType last,
                                   const bool strict = true,
-                                  const bool allow_exceptions = true)
+                                  const bool allow_exceptions = true,
+                                  const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::move(first), std::move(last));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::bjdata).sax_parse(input_format_t::bjdata, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::move(first), std::move(last)), input_format_t::bjdata, strict, allow_exceptions, error_handler);
     }
+
+    template<typename T>
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    JSON_HEDLEY_DEPRECATED_FOR(3.13.0, from_bjdata(ptr, ptr + len))
+    static basic_json from_bjdata(const T* ptr, std::size_t len,
+                                  const bool strict = true,
+                                  const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
+    {
+        return from_bjdata(ptr, ptr + len, strict, allow_exceptions);
+    }
+#endif
+
+    /// @brief create a JSON value from an input in BON8 format
+    /// @sa https://json.nlohmann.me/api/basic_json/from_bon8/
+    template<typename InputType>
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json from_bon8(InputType&& i,
+                                const bool strict = true,
+                                const bool allow_exceptions = true)
+    {
+        return from_binary_impl(detail::input_adapter(std::forward<InputType>(i)), input_format_t::bon8, strict, allow_exceptions);
+    }
+
+    /// @brief create a JSON value from an input in BON8 format (iterator pair, or iterator+sentinel pair for C++20 ranges support)
+    /// @sa https://json.nlohmann.me/api/basic_json/from_bon8/
+    template<typename IteratorType, typename SentinelType = IteratorType,
+             detail::enable_if_t<detail::can_compare_ne<IteratorType, SentinelType>::value, int> = 0>
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    static basic_json from_bon8(IteratorType first, SentinelType last,
+                                const bool strict = true,
+                                const bool allow_exceptions = true)
+    {
+        return from_binary_impl(detail::input_adapter(std::move(first), std::move(last)), input_format_t::bon8, strict, allow_exceptions);
+    }
+
+    template<typename T>
+    JSON_HEDLEY_WARN_UNUSED_RESULT
+    JSON_HEDLEY_DEPRECATED_FOR(3.13.0, from_bon8(ptr, ptr + len))
+    static basic_json from_bon8(const T* ptr, std::size_t len,
+                                const bool strict = true,
+                                const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
+    {
+        return from_bon8(ptr, ptr + len, strict, allow_exceptions);
+    }
+#endif
 
     /// @brief create a JSON value from an input in BSON format
     /// @sa https://json.nlohmann.me/api/basic_json/from_bson/
@@ -4804,16 +6367,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_bson(InputType&& i,
                                 const bool strict = true,
-                                const bool allow_exceptions = true)
+                                const bool allow_exceptions = true,
+                                const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::forward<InputType>(i));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::bson).sax_parse(input_format_t::bson, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::forward<InputType>(i)), input_format_t::bson, strict, allow_exceptions, error_handler);
     }
 
     /// @brief create a JSON value from an input in BSON format (iterator pair, or iterator+sentinel pair for C++20 ranges support)
@@ -4823,16 +6380,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     JSON_HEDLEY_WARN_UNUSED_RESULT
     static basic_json from_bson(IteratorType first, SentinelType last,
                                 const bool strict = true,
-                                const bool allow_exceptions = true)
+                                const bool allow_exceptions = true,
+                                const error_handler_t error_handler = error_handler_t::keep)
     {
-        basic_json result;
-        auto ia = detail::input_adapter(std::move(first), std::move(last));
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::bson).sax_parse(input_format_t::bson, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(detail::input_adapter(std::move(first), std::move(last)), input_format_t::bson, strict, allow_exceptions, error_handler);
     }
 
     template<typename T>
@@ -4841,26 +6392,26 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     static basic_json from_bson(const T* ptr, std::size_t len,
                                 const bool strict = true,
                                 const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return from_bson(ptr, ptr + len, strict, allow_exceptions);
     }
+#endif
 
     JSON_HEDLEY_WARN_UNUSED_RESULT
     JSON_HEDLEY_DEPRECATED_FOR(3.8.0, from_bson(ptr, ptr + len))
     static basic_json from_bson(detail::span_input_adapter&& i,
                                 const bool strict = true,
                                 const bool allow_exceptions = true)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+        = delete;
+#else
     {
-        basic_json result;
-        auto ia = i.get();
-        detail::json_sax_dom_parser<basic_json, decltype(ia)> sdp(result, allow_exceptions);
-        // NOLINTNEXTLINE(hicpp-move-const-arg,performance-move-const-arg)
-        if (!binary_reader<decltype(ia)>(std::move(ia), input_format_t::bson).sax_parse(input_format_t::bson, &sdp, strict)) // cppcheck-suppress[accessMoved]
-        {
-            result = value_t::discarded;
-        }
-        return result;
+        return from_binary_impl(i.get(), input_format_t::bson, strict, allow_exceptions);
     }
+#endif
     /// @}
 
     //////////////////////////
@@ -4880,9 +6431,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     template<typename BasicJsonType, detail::enable_if_t<detail::is_basic_json<BasicJsonType>::value, int> = 0>
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     reference operator[](const ::nlohmann::json_pointer<BasicJsonType>& ptr)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return ptr.get_unchecked(this);
     }
+#endif
 
     /// @brief access specified element via JSON Pointer
     /// @sa https://json.nlohmann.me/api/basic_json/operator%5B%5D/
@@ -4894,9 +6449,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     template<typename BasicJsonType, detail::enable_if_t<detail::is_basic_json<BasicJsonType>::value, int> = 0>
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     const_reference operator[](const ::nlohmann::json_pointer<BasicJsonType>& ptr) const
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return ptr.get_unchecked(this);
     }
+#endif
 
     /// @brief access specified element via JSON Pointer
     /// @sa https://json.nlohmann.me/api/basic_json/at/
@@ -4908,9 +6467,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     template<typename BasicJsonType, detail::enable_if_t<detail::is_basic_json<BasicJsonType>::value, int> = 0>
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     reference at(const ::nlohmann::json_pointer<BasicJsonType>& ptr)
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return ptr.get_checked(this);
     }
+#endif
 
     /// @brief access specified element via JSON Pointer
     /// @sa https://json.nlohmann.me/api/basic_json/at/
@@ -4922,9 +6485,13 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     template<typename BasicJsonType, detail::enable_if_t<detail::is_basic_json<BasicJsonType>::value, int> = 0>
     JSON_HEDLEY_DEPRECATED_FOR(3.11.0, basic_json::json_pointer or nlohmann::json_pointer<basic_json::string_t>) // NOLINT(readability/alt_tokens)
     const_reference at(const ::nlohmann::json_pointer<BasicJsonType>& ptr) const
+#if JSON_DELETE_DEPRECATED_FUNCTIONS
+    = delete;
+#else
     {
         return ptr.get_checked(this);
     }
+#endif
 
     /// @brief return flattened JSON value
     /// @sa https://json.nlohmann.me/api/basic_json/flatten/
@@ -5035,7 +6602,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                         if (JSON_HEDLEY_UNLIKELY(idx > parent.size()))
                         {
                             // avoid undefined behavior
-                            JSON_THROW(out_of_range::create(401, detail::concat("array index ", std::to_string(idx), " is out of range"), &parent));
+                            JSON_THROW(out_of_range::create(detail::exception_id::array_index_out_of_range, detail::concat("array index ", std::to_string(idx), " is out of range"), &parent));
                         }
 
                         // default case: insert add offset
@@ -5054,7 +6621,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 case value_t::binary:
                 case value_t::discarded:
                 default:
-                    JSON_THROW(out_of_range::create(411, detail::concat("cannot add value: the JSON Patch 'add' target's parent is of type ", parent.type_name(), ", but must be an object or array"), &parent));
+                    JSON_THROW(out_of_range::create(detail::exception_id::patch_add_parent_not_container, detail::concat("cannot add value: the JSON Patch 'add' target's parent is of type ", parent.type_name(), ", but must be an object or array"), &parent));
             }
         };
 
@@ -5077,7 +6644,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 }
                 else
                 {
-                    JSON_THROW(out_of_range::create(403, detail::concat("key '", last_path, "' not found"), this));
+                    JSON_THROW(out_of_range::create(detail::exception_id::key_not_found, detail::concat("key '", last_path, "' not found"), this));
                 }
             }
             else if (parent.is_array())
@@ -5089,7 +6656,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             {
                 // the parent of a "remove" target must be an object or array
                 // (see #5396)
-                JSON_THROW(out_of_range::create(413, detail::concat("cannot remove value: the JSON Patch 'remove' target's parent is of type ", parent.type_name(), ", but must be an object or array"), &parent));
+                JSON_THROW(out_of_range::create(detail::exception_id::patch_remove_parent_not_container, detail::concat("cannot remove value: the JSON Patch 'remove' target's parent is of type ", parent.type_name(), ", but must be an object or array"), &parent));
             }
         };
 
@@ -5120,7 +6687,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
         // type check: top level value must be an array
         if (JSON_HEDLEY_UNLIKELY(!json_patch.is_array()))
         {
-            JSON_THROW(parse_error::create(104, 0, "JSON patch must be an array of objects", &json_patch));
+            JSON_THROW(parse_error::create(detail::exception_id::patch_not_an_array, 0, "JSON patch must be an array of objects", &json_patch));
         }
 
         // iterate and apply the operations
@@ -5141,14 +6708,14 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 if (JSON_HEDLEY_UNLIKELY(it == val.m_data.m_value.object->end()))
                 {
                     // NOLINTNEXTLINE(performance-inefficient-string-concatenation)
-                    JSON_THROW(parse_error::create(105, 0, detail::concat(error_msg, " must have member '", member, "'"), &val));
+                    JSON_THROW(parse_error::create(detail::exception_id::patch_invalid_operation, 0, detail::concat(error_msg, " must have member '", member, "'"), &val));
                 }
 
                 // check if the result is of type string
                 if (JSON_HEDLEY_UNLIKELY(string_type && !it->second.is_string()))
                 {
                     // NOLINTNEXTLINE(performance-inefficient-string-concatenation)
-                    JSON_THROW(parse_error::create(105, 0, detail::concat(error_msg, " must have string member '", member, "'"), &val));
+                    JSON_THROW(parse_error::create(detail::exception_id::patch_invalid_operation, 0, detail::concat(error_msg, " must have string member '", member, "'"), &val));
                 }
 
                 // no error: return value
@@ -5158,7 +6725,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             // type check: every element of the array must be an object
             if (JSON_HEDLEY_UNLIKELY(!val.is_object()))
             {
-                JSON_THROW(parse_error::create(104, 0, "JSON patch must be an array of objects", &val));
+                JSON_THROW(parse_error::create(detail::exception_id::patch_not_an_array, 0, "JSON patch must be an array of objects", &val));
             }
 
             // collect mandatory members
@@ -5194,7 +6761,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
                     if (JSON_HEDLEY_UNLIKELY(is_proper_prefix(from_ptr, ptr)))
                     {
-                        JSON_THROW(out_of_range::create(414, detail::concat("cannot move value: 'from' path '", from_path, "' is a proper prefix of 'path' '", path, "'"), &result));
+                        JSON_THROW(out_of_range::create(detail::exception_id::patch_move_into_child, detail::concat("cannot move value: 'from' path '", from_path, "' is a proper prefix of 'path' '", path, "'"), &result));
                     }
 
                     // the "from" location must exist - use at()
@@ -5241,7 +6808,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                     // throw an exception if the test fails
                     if (JSON_HEDLEY_UNLIKELY(!success))
                     {
-                        JSON_THROW(other_error::create(501, detail::concat("unsuccessful: ", val.dump()), &val));
+                        JSON_THROW(other_error::create(detail::exception_id::patch_test_failed, detail::concat("unsuccessful: ", val.dump()), &val));
                     }
 
                     break;
@@ -5252,7 +6819,7 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 {
                     // op must be "add", "remove", "replace", "move", "copy", or
                     // "test"
-                    JSON_THROW(parse_error::create(105, 0, detail::concat("operation value '", op, "' is invalid"), &val));
+                    JSON_THROW(parse_error::create(detail::exception_id::patch_invalid_operation, 0, detail::concat("operation value '", op, "' is invalid"), &val));
                 }
             }
         }
@@ -5275,21 +6842,263 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     {
         // the patch
         basic_json result(value_t::array);
+        diff_recursively(result, source, target, path, 0);
+        return result;
+    }
 
-        // if the values are the same, return an empty patch
+  private:
+    /// @brief two arrays or two objects @ref diff_iteratively is diffing
+    struct diff_frame
+    {
+        diff_frame(const basic_json* source_, const basic_json* target_, const std::size_t path_length_) noexcept
+            : source(source_), target(target_), path_length(path_length_)
+        {}
+
+        // declared for GCC's -Weffc++, which asks for them in a class with
+        // pointer members and a non-trivial destructor; the exception
+        // specifications are left implicit, as GCC 4.8 rejects explicit ones
+        // that differ from them
+        diff_frame(const diff_frame&) = default;
+        diff_frame(diff_frame&&) = default;
+        diff_frame& operator=(const diff_frame&) = default;
+        diff_frame& operator=(diff_frame&&) = default;
+        ~diff_frame() = default;
+
+        /// the values being diffed, both arrays or both objects
+        const basic_json* source;
+        const basic_json* target;
+        /// the length of their path in `current_path`
+        std::size_t path_length;
+        /// arrays: the next index to diff
+        std::size_t index = 0;
+        /// objects: the next member of source to look at
+        const_iterator member{}; // NOLINT(readability-redundant-member-init)
+        /// objects: the keys common to both, in source's order
+        std::vector<typename object_t::key_type> common_keys{}; // NOLINT(readability-redundant-member-init)
+        /// objects: the next entry of common_keys
+        std::size_t next_common = 0;
+        /// objects: the "add" operations for keys only target has
+        basic_json added_ops{}; // NOLINT(readability-redundant-member-init)
+    };
+
+    // The operations of a diff are built by the functions below rather than
+    // where they are needed: building one takes several temporaries, and
+    // unoptimized builds give each temporary a stack slot of its own in the
+    // function it appears in. In diff_recursively, which is on the call stack
+    // once per nesting level, that made every level cost kilobytes of stack.
+
+    /// @brief append a "replace" operation for @a path with @a value to @a result
+    static void diff_replace(basic_json& result, const string_t& path, const basic_json& value)
+    {
+        result.push_back(
+        {
+            {"op", "replace"}, {"path", path}, {"value", value}
+        });
+    }
+
+    /// @brief append a "remove" operation for @a path to @a result
+    static void diff_remove(basic_json& result, const string_t& path)
+    {
+        result.push_back(object(
+        {
+            {"op", "remove"}, {"path", path}
+        }));
+    }
+
+    /// @brief append an "add" operation for @a path with @a value to @a result
+    static void diff_add(basic_json& result, const string_t& path, const basic_json& value)
+    {
+        result.push_back(
+        {
+            {"op", "add"}, {"path", path}, {"value", value}
+        });
+    }
+
+    /// @brief append the "remove" operations for the elements of array
+    ///        @a source from @a index on, and the "add" operations for the
+    ///        elements of array @a target from source's size on, to @a result
+    static void diff_array_tails(basic_json& result, const basic_json& source, const basic_json& target,
+                                 const string_t& path, const std::size_t index)
+    {
+        // remove my remaining elements, highest index first; appending
+        // in that order avoids the quadratic reinsertion done before
+        for (std::size_t j = source.size(); j > index; --j)
+        {
+            diff_remove(result, detail::concat<string_t>(path, '/', detail::to_string<string_t>(j - 1)));
+        }
+
+        // add other remaining elements
+        for (std::size_t i = source.size(); i < target.size(); ++i)
+        {
+            diff_add(result, detail::concat<string_t>(path, "/-"), target[i]);
+        }
+    }
+
+    /*!
+    @brief compare the keys of objects @a source and @a target
+
+    If object_t does not keep its members in insertion order, or if the keys
+    both objects have are in the same order in both, and the keys only
+    @a target has come after them, stores the keys common to both in
+    source's order in @a common_keys, stores the "add" operations for the keys
+    only @a target has in @a added_ops, and returns true: the caller then diffs
+    the objects member by member. Otherwise, appends operations that remove
+    every member of @a source and add every member of @a target to @a result,
+    and returns false.
+    */
+    static bool diff_object_keys(basic_json& result, const basic_json& source, const basic_json& target,
+                                 const string_t& path, std::vector<typename object_t::key_type>& common_keys,
+                                 basic_json& added_ops)
+    {
+        // first pass: record, for every source key, whether it is
+        // common to both objects (in source's iteration order) or
+        // was deleted (i.e., in source but not in target) -- this is
+        // a by-product of the target.find() call already needed to
+        // tell the two cases apart, so it adds no extra lookups. The
+        // "remove" ops themselves are emitted later, interleaved
+        // with the per-key diffs in the caller's fast path, to match
+        // source's original iteration order (as the original,
+        // pre-reordering-aware implementation did) instead of
+        // grouping all removes before all per-key diffs.
+        std::vector<typename object_t::key_type> common_keys_source_order;
+        for (auto it = source.cbegin(); it != source.cend(); ++it)
+        {
+            if (target.find(it.key()) != target.end())
+            {
+                common_keys_source_order.push_back(it.key());
+            }
+        }
+
+        // second pass: find keys that were added (i.e., in target but
+        // not in source), and record the keys common to both, in
+        // target's iteration order -- again a by-product of the
+        // source.find() call already needed to detect added keys. At
+        // the same time, determine whether every added key comes
+        // after every common key in target's order (a precondition
+        // for the fast path, which only ever appends new keys
+        // at the very end). Both are only needed for an object_t that
+        // keeps its members in insertion order, such as the one
+        // backing `ordered_json`; for any other object_t, the fast
+        // path is always taken and they are not computed.
+        // The patch ops for keys that were added (i.e., in target but not
+        // in source) are built here so the fast path can reuse
+        // them without a second source.find() per target key. Only
+        // used by the fast path -- the slow (reordering) path
+        // rebuilds "add" ops for every key itself.
+        std::vector<typename object_t::key_type> common_keys_target_order;
+        bool new_keys_form_suffix = true;
+        bool seen_new_key = false;
+        for (auto it = target.cbegin(); it != target.cend(); ++it)
+        {
+            if (source.find(it.key()) == source.end())
+            {
+                seen_new_key = true;
+                diff_add(added_ops, detail::concat<string_t>(path, '/', detail::escape(it.key())), it.value());
+            }
+            else
+            {
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(push )
+#pragma warning(disable : 4127) // ignore warning to replace if with if constexpr
+#endif
+                if (detail::is_ordered_map<object_t>::value)
+                {
+                    common_keys_target_order.push_back(it.key());
+                    if (seen_new_key)
+                    {
+                        new_keys_form_suffix = false;
+                    }
+                }
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning( pop )
+#endif
+            }
+        }
+
+        // Only an object type that keeps its members in insertion
+        // order, such as nlohmann::ordered_map, can need reordering:
+        // patch() appends a new member at the end of such an object.
+        // Any other object type places its members itself - std::map
+        // in key order, a hash map in an order its operator== ignores -
+        // so a member-by-member diff always reproduces target there.
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning(push )
+#pragma warning(disable : 4127) // ignore warning to replace if with if constexpr
+#endif
+        if (!detail::is_ordered_map<object_t>::value
+                || (common_keys_source_order == common_keys_target_order && new_keys_form_suffix))
+        {
+            // fast path: order of common keys already matches (or the
+            // object_t's iteration order does not depend on
+            // insertion history), so a plain per-key diff is correct
+            // and minimal, as before
+            common_keys = std::move(common_keys_source_order);
+            return true;
+        }
+#ifdef JSON_HEDLEY_MSVC_VERSION
+#pragma warning( pop )
+#endif
+
+        // slow path: the common keys are in a different relative
+        // order in source and target (only possible for a
+        // reorderable object_t like ordered_map). Building a
+        // minimal reordering patch is a nontrivial (LCS-like)
+        // problem; instead, remove every source key -- both
+        // deleted keys (which must be removed regardless) and
+        // common keys (removed so they can be re-added in
+        // target's order) -- and re-add every key that should
+        // remain, with its final target value, in target's
+        // order. basic_json::patch()'s "add" operation on an
+        // object uses operator[], which appends at the end for a
+        // vector-backed insertion-ordered map when the key does
+        // not already exist -- so removing a key and then adding
+        // it moves it to the end, fixing its position.
+        for (auto it = source.cbegin(); it != source.cend(); ++it)
+        {
+            diff_remove(result, detail::concat<string_t>(path, '/', detail::escape(it.key())));
+        }
+
+        // add every key that is either common (just removed
+        // above) or brand new, in target's iteration order, so
+        // that the final order after applying the patch matches
+        // target exactly
+        for (auto it = target.cbegin(); it != target.cend(); ++it)
+        {
+            diff_add(result, detail::concat<string_t>(path, '/', detail::escape(it.key())), it.value());
+        }
+        return false;
+    }
+
+    /*!
+    @brief @ref diff, for values at nesting level @a depth, appending the
+           operations to @a result
+
+    Diffing two arrays or objects calls this function again, once per nesting
+    level, so values nested deeply enough used to exhaust the call stack and
+    terminate the process. The descent is bounded here: once @ref
+    detail::recursion_depth_limit levels have been entered, @ref
+    diff_iteratively diffs what is left without the call stack.
+    */
+    static void diff_recursively(basic_json& result, const basic_json& source, const basic_json& target,
+                                 const string_t& path, const std::size_t depth)
+    {
+        // if the values are the same, there is nothing to do
         if (source == target)
         {
-            return result;
+            return;
+        }
+
+        if (JSON_HEDLEY_UNLIKELY(depth >= detail::recursion_depth_limit()))
+        {
+            diff_iteratively(result, source, target, path);
+            return;
         }
 
         if (source.type() != target.type())
         {
             // different types: replace value
-            result.push_back(
-            {
-                {"op", "replace"}, {"path", path}, {"value", target}
-            });
-            return result;
+            diff_replace(result, path, target);
+            return;
         }
 
         switch (source.type())
@@ -5301,185 +7110,50 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 while (i < source.size() && i < target.size())
                 {
                     // recursive call to compare array values at index i
-                    auto temp_diff = diff(source[i], target[i], detail::concat<string_t>(path, '/', detail::to_string<string_t>(i)));
-                    result.insert(result.end(), temp_diff.begin(), temp_diff.end());
+                    diff_recursively(result, source[i], target[i], detail::concat<string_t>(path, '/', detail::to_string<string_t>(i)), depth + 1);
                     ++i;
                 }
 
                 // We now reached the end of at least one array
                 // in a second pass, traverse the remaining elements
-
-                // remove my remaining elements, highest index first; appending
-                // in that order avoids the quadratic reinsertion done before
-                for (std::size_t j = source.size(); j > i; --j)
-                {
-                    result.push_back(object(
-                    {
-                        {"op", "remove"},
-                        {"path", detail::concat<string_t>(path, '/', detail::to_string<string_t>(j - 1))}
-                    }));
-                }
-                i = source.size();
-
-                // add other remaining elements
-                while (i < target.size())
-                {
-                    result.push_back(
-                    {
-                        {"op", "add"},
-                        {"path", detail::concat<string_t>(path, "/-")},
-                        {"value", target[i]}
-                    });
-                    ++i;
-                }
-
+                diff_array_tails(result, source, target, path, i);
                 break;
             }
 
             case value_t::object:
             {
-                // first pass: record, for every source key, whether it is
-                // common to both objects (in source's iteration order) or
-                // was deleted (i.e., in source but not in target) -- this is
-                // a by-product of the target.find() call already needed to
-                // tell the two cases apart, so it adds no extra lookups. The
-                // "remove" ops themselves are emitted later, interleaved
-                // with the recursive per-key diffs in the fast path below,
-                // to match source's original iteration order (as the
-                // original, pre-reordering-aware implementation did) instead
-                // of grouping all removes before all recursive diffs.
-                std::vector<typename object_t::key_type> common_keys_source_order;
-                for (auto it = source.cbegin(); it != source.cend(); ++it)
-                {
-                    if (target.find(it.key()) != target.end())
-                    {
-                        common_keys_source_order.push_back(it.key());
-                    }
-                }
-
-                // second pass: find keys that were added (i.e., in target but
-                // not in source), and record the keys common to both, in
-                // target's iteration order -- again a by-product of the
-                // source.find() call already needed to detect added keys. At
-                // the same time, determine whether every added key comes
-                // after every common key in target's order (a precondition
-                // for the fast path below, which only ever appends new keys
-                // at the very end): for an object_t whose iteration order is
-                // a pure function of the key set (e.g. the default std::map,
-                // which always iterates in sorted key order), the order
-                // check further below is always true and this whole
-                // mechanism is effectively a no-op; it only matters for a
-                // reorderable object_t such as the one backing `ordered_json`.
-                // patch ops for keys that were added (i.e., in target but not
-                // in source); built here so the fast path below can reuse
-                // them without a second source.find() per target key. Only
-                // used by the fast path -- the slow (reordering) path
-                // rebuilds "add" ops for every key itself.
-                std::vector<typename object_t::key_type> common_keys_target_order;
+                std::vector<typename object_t::key_type> common_keys;
                 basic_json added_ops(value_t::array);
-                bool new_keys_form_suffix = true;
-                bool seen_new_key = false;
-                for (auto it = target.cbegin(); it != target.cend(); ++it)
+                if (diff_object_keys(result, source, target, path, common_keys, added_ops))
                 {
-                    if (source.find(it.key()) == source.end())
-                    {
-                        seen_new_key = true;
-                        const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
-                        added_ops.push_back(
-                        {
-                            {"op", "add"}, {"path", path_key},
-                            {"value", it.value()}
-                        });
-                    }
-                    else
-                    {
-                        common_keys_target_order.push_back(it.key());
-                        if (seen_new_key)
-                        {
-                            new_keys_form_suffix = false;
-                        }
-                    }
-                }
-
-                if (common_keys_source_order == common_keys_target_order && new_keys_form_suffix)
-                {
-                    // fast path: order of common keys already matches (or the
-                    // object_t's iteration order does not depend on
-                    // insertion history), so a plain per-key recursive diff
-                    // is correct and minimal, as before. common_keys_source_order
-                    // is, by construction, the subsequence of source's keys
-                    // that are common to both objects, in source's iteration
-                    // order -- so it can be walked in lockstep with `source`
-                    // using a cheap key comparison instead of another lookup.
-                    // Deleted keys (those source keys not in common_keys_source_order)
-                    // are interleaved here too, in source's original order, to
-                    // match the historical (pre-reordering-aware) output order.
-                    auto common_it = common_keys_source_order.cbegin();
+                    // fast path: common_keys is, by construction, the
+                    // subsequence of source's keys that are common to both
+                    // objects, in source's iteration order -- so it can be
+                    // walked in lockstep with `source` using a cheap key
+                    // comparison instead of another lookup. Deleted keys
+                    // (those source keys not in common_keys) are interleaved
+                    // here too, in source's original order, to match the
+                    // historical (pre-reordering-aware) output order.
+                    auto common_it = common_keys.cbegin();
                     for (auto it = source.cbegin(); it != source.cend(); ++it)
                     {
-                        if (common_it != common_keys_source_order.cend() && it.key() == *common_it)
+                        if (common_it != common_keys.cend() && it.key() == *common_it)
                         {
-                            const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
-                            auto temp_diff = diff(it.value(), target[it.key()], path_key);
-                            result.insert(result.end(), temp_diff.begin(), temp_diff.end());
+                            diff_recursively(result, it.value(), target[it.key()], detail::concat<string_t>(path, '/', detail::escape(it.key())), depth + 1);
                             ++common_it;
                         }
                         else
                         {
                             // found a key that is not in target -> remove it
-                            const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
-                            result.push_back(object(
-                            {
-                                {"op", "remove"}, {"path", path_key}
-                            }));
+                            diff_remove(result, detail::concat<string_t>(path, '/', detail::escape(it.key())));
                         }
                     }
 
-                    // append the "add" ops for brand-new keys collected above
-                    // during the pass over target -- no second source.find()
-                    // per target key needed
+                    // append the "add" ops for brand-new keys collected by
+                    // diff_object_keys -- no second source.find() per target
+                    // key needed
                     result.insert(result.end(), added_ops.begin(), added_ops.end());
                 }
-                else
-                {
-                    // slow path: the common keys are in a different relative
-                    // order in source and target (only possible for a
-                    // reorderable object_t like ordered_map). Building a
-                    // minimal reordering patch is a nontrivial (LCS-like)
-                    // problem; instead, remove every source key -- both
-                    // deleted keys (which must be removed regardless) and
-                    // common keys (removed so they can be re-added in
-                    // target's order) -- and re-add every key that should
-                    // remain, with its final target value, in target's
-                    // order. basic_json::patch()'s "add" operation on an
-                    // object uses operator[], which appends at the end for a
-                    // vector-backed insertion-ordered map when the key does
-                    // not already exist -- so removing a key and then adding
-                    // it moves it to the end, fixing its position.
-                    for (auto it = source.cbegin(); it != source.cend(); ++it)
-                    {
-                        const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
-                        result.push_back(object(
-                        {
-                            {"op", "remove"}, {"path", path_key}
-                        }));
-                    }
-
-                    // add every key that is either common (just removed
-                    // above) or brand new, in target's iteration order, so
-                    // that the final order after applying the patch matches
-                    // target exactly
-                    for (auto it = target.cbegin(); it != target.cend(); ++it)
-                    {
-                        const auto path_key = detail::concat<string_t>(path, '/', detail::escape(it.key()));
-                        result.push_back(
-                        {
-                            {"op", "add"}, {"path", path_key},
-                            {"value", it.value()}
-                        });
-                    }
-                }
-
                 break;
             }
 
@@ -5494,16 +7168,170 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             default:
             {
                 // both primitive types: replace value
-                result.push_back(
-                {
-                    {"op", "replace"}, {"path", path}, {"value", target}
-                });
+                diff_replace(result, path, target);
                 break;
             }
         }
-
-        return result;
     }
+
+    /*!
+    @brief @ref diff without the call stack, appending the operations to
+           @a result
+
+    Produces the same operations as @ref diff_recursively. Only reached for
+    values nested more deeply than @ref detail::recursion_depth_limit.
+    */
+    static void diff_iteratively(basic_json& result, const basic_json& source, const basic_json& target,
+                                 const string_t& path)
+    {
+        // The arrays and objects being diffed are kept on an explicit stack,
+        // and every pair of elements is still diffed completely before the
+        // next one, so the operations come out in the same order as in
+        // diff_recursively. The path of the values being diffed is kept in
+        // one buffer that grows and shrinks with the stack, rather than in a
+        // new string per level.
+        std::vector<diff_frame> stack;
+        string_t current_path = path;
+
+        // diff `s` against `t`, whose path is current_path: primitives,
+        // values of different types, and objects whose members were reordered
+        // are handled right away; arrays and other objects get a frame
+        const auto enter = [&result, &stack, &current_path](const basic_json & s, const basic_json & t)
+        {
+            // if the values are the same, there is nothing to do. Arrays and
+            // objects are not compared up front: comparing them visits
+            // everything below them, so doing that at every level would take
+            // quadratic time in the nesting depth - equal ones yield no
+            // operations anyway.
+            if ((!s.is_structured() || !t.is_structured()) && s == t)
+            {
+                return;
+            }
+
+            if (s.type() != t.type())
+            {
+                // different types: replace value
+                diff_replace(result, current_path, t);
+                return;
+            }
+
+            switch (s.type())
+            {
+                case value_t::array:
+                {
+                    stack.emplace_back(&s, &t, current_path.size());
+                    return;
+                }
+
+                case value_t::object:
+                {
+                    std::vector<typename object_t::key_type> common_keys;
+                    basic_json added_ops(value_t::array);
+                    if (diff_object_keys(result, s, t, current_path, common_keys, added_ops))
+                    {
+                        // fast path: the frame walks source in lockstep with
+                        // common_keys, as diff_recursively does, and appends
+                        // added_ops once all members are done
+                        stack.emplace_back(&s, &t, current_path.size());
+                        stack.back().member = s.cbegin();
+                        stack.back().common_keys = std::move(common_keys);
+                        stack.back().added_ops = std::move(added_ops);
+                    }
+                    return;
+                }
+
+                case value_t::null:
+                case value_t::string:
+                case value_t::boolean:
+                case value_t::number_integer:
+                case value_t::number_unsigned:
+                case value_t::number_float:
+                case value_t::binary:
+                case value_t::discarded:
+                default:
+                {
+                    // both primitive types: replace value
+                    diff_replace(result, current_path, t);
+                    return;
+                }
+            }
+        };
+
+        enter(source, target);
+        while (!stack.empty())
+        {
+            // the frame is copied out member by member and changed through
+            // stack.back(): enter() may push a frame and the end of the loop
+            // pops it, either of which would invalidate a reference to it
+            const basic_json* const s = stack.back().source;
+            const basic_json* const t = stack.back().target;
+            const std::size_t path_length = stack.back().path_length;
+            const std::size_t depth = stack.size();
+
+            if (s->is_array())
+            {
+                const auto& source_array = *s->m_data.m_value.array;
+                const auto& target_array = *t->m_data.m_value.array;
+
+                // first pass: traverse common elements
+                const std::size_t i = stack.back().index;
+                if (i < source_array.size() && i < target_array.size())
+                {
+                    ++stack.back().index;
+                    detail::concat_into(current_path, '/', detail::to_string<string_t>(i));
+                    enter(source_array[i], target_array[i]);
+                    if (stack.size() == depth)
+                    {
+                        current_path.resize(path_length);
+                    }
+                    continue;
+                }
+
+                // We now reached the end of at least one array
+                // in a second pass, traverse the remaining elements
+                diff_array_tails(result, *s, *t, current_path, i);
+            }
+            else
+            {
+                const const_iterator it = stack.back().member;
+                if (it != s->cend())
+                {
+                    ++stack.back().member;
+                    const std::size_t next_common = stack.back().next_common;
+                    if (next_common < stack.back().common_keys.size() && it.key() == stack.back().common_keys[next_common])
+                    {
+                        ++stack.back().next_common;
+                        const basic_json& target_value = (*t)[it.key()];
+                        detail::concat_into(current_path, '/', detail::escape(it.key()));
+                        enter(it.value(), target_value);
+                        if (stack.size() == depth)
+                        {
+                            current_path.resize(path_length);
+                        }
+                    }
+                    else
+                    {
+                        // found a key that is not in target -> remove it
+                        diff_remove(result, detail::concat<string_t>(current_path, '/', detail::escape(it.key())));
+                    }
+                    continue;
+                }
+
+                // append the "add" ops for brand-new keys collected when the
+                // object was entered
+                result.insert(result.end(), stack.back().added_ops.begin(), stack.back().added_ops.end());
+            }
+
+            // this array or object is done: continue with the one it is in
+            stack.pop_back();
+            if (!stack.empty())
+            {
+                current_path.resize(stack.back().path_length);
+            }
+        }
+    }
+
+  public:
     /// @}
 
     ////////////////////////////////
@@ -5517,8 +7345,32 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     /// @sa https://json.nlohmann.me/api/basic_json/merge_patch/
     void merge_patch(const basic_json& apply_patch)
     {
+        // copy first: apply_patch may be *this or one of its descendants,
+        // and is iterated (and moved from) below to patch *this
+        basic_json patch = apply_patch;
+        apply_merge_patch(patch, 0);
+    }
+
+  private:
+    /*!
+    @brief @ref merge_patch, for a patch at nesting level @a depth
+
+    Applying a nested object calls this function again, once per nesting
+    level, so a patch nested deeply enough used to exhaust the call stack and
+    terminate the process. The descent is bounded here: once @ref
+    detail::recursion_depth_limit levels have been entered, @ref
+    merge_patch_iteratively applies what is left without the call stack.
+    */
+    void apply_merge_patch(basic_json& apply_patch, const std::size_t depth)
+    {
         if (apply_patch.is_object())
         {
+            if (JSON_HEDLEY_UNLIKELY(depth >= detail::recursion_depth_limit()))
+            {
+                merge_patch_iteratively(apply_patch);
+                return;
+            }
+
             if (!is_object())
             {
                 *this = object();
@@ -5531,16 +7383,72 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 }
                 else
                 {
-                    operator[](it.key()).merge_patch(it.value());
+                    operator[](it.key()).apply_merge_patch(it.value(), depth + 1);
                 }
             }
         }
         else
         {
-            *this = apply_patch;
+            *this = std::move(apply_patch);
         }
     }
 
+    /*!
+    @brief apply @a apply_patch to this value without the call stack
+
+    Does the same as @ref merge_patch, keeping the objects being patched on an
+    explicit stack instead of descending into them. A nested object is still
+    patched completely before the next member, in the same order as the
+    recursive version. Only reached for patches nested deeper than @ref
+    detail::recursion_depth_limit.
+    */
+    void merge_patch_iteratively(basic_json& apply_patch)
+    {
+        std::vector<merge_frame> stack;
+
+        // patch `target` with `patch`, or start patching it member by member
+        const auto apply = [&stack](basic_json & target, basic_json & patch)
+        {
+            if (patch.is_object())
+            {
+                if (!target.is_object())
+                {
+                    target = basic_json::object();
+                }
+                stack.emplace_back(&target, patch.begin(), patch.end());
+            }
+            else
+            {
+                target = std::move(patch);
+            }
+        };
+
+        apply(*this, apply_patch);
+        while (!stack.empty())
+        {
+            // a copy, as applying a member below can reallocate the stack;
+            // the frame itself is only changed through stack.back()
+            const merge_frame frame = stack.back();
+            if (frame.position == frame.last)
+            {
+                stack.pop_back();
+                continue;
+            }
+
+            const iterator member = frame.position;
+            ++stack.back().position;
+            if (member.value().is_null())
+            {
+                frame.target->erase(member.key());
+            }
+            else
+            {
+                apply(frame.target->operator[](member.key()), member.value());
+            }
+        }
+    }
+
+  public:
     /// @}
 };
 
@@ -5560,55 +7468,18 @@ std::string format_as(const NLOHMANN_BASIC_JSON_TPL& j)
     return j.dump();
 }
 
-inline namespace literals
-{
-inline namespace json_literals
-{
+#if JSON_DELETE_DEPRECATED_FUNCTIONS && !defined(JSON_NO_IO)
+    /// @brief serialize to stream (deleted; use operator<<(std::ostream&, const basic_json&))
+    /// @sa https://json.nlohmann.me/api/operator_ltlt/
+    NLOHMANN_BASIC_JSON_TPL_DECLARATION
+    std::ostream& operator>>(const NLOHMANN_BASIC_JSON_TPL& j, std::ostream& o) = delete;
 
-/// @brief user-defined string literal for JSON values
-/// @sa https://json.nlohmann.me/api/basic_json/operator_literal_json/
-JSON_HEDLEY_NON_NULL(1)
-#if !defined(JSON_HEDLEY_GCC_VERSION) || JSON_HEDLEY_GCC_VERSION_CHECK(4,9,0)
-    inline nlohmann::json operator""_json(const char* s, std::size_t n)
-#else
-    // GCC 4.8 requires a space between "" and suffix
-    inline nlohmann::json operator"" _json(const char* s, std::size_t n)
-#endif
-{
-    return nlohmann::json::parse(s, s + n);
-}
-
-#if defined(__cpp_char8_t)
-JSON_HEDLEY_NON_NULL(1)
-inline nlohmann::json operator""_json(const char8_t* s, std::size_t n)
-{
-    return nlohmann::json::parse(reinterpret_cast<const char*>(s),
-                                 reinterpret_cast<const char*>(s) + n);
-}
+    /// @brief deserialize from stream (deleted; use operator>>(std::istream&, basic_json&))
+    /// @sa https://json.nlohmann.me/api/operator_gtgt/
+    NLOHMANN_BASIC_JSON_TPL_DECLARATION
+    std::istream& operator<<(NLOHMANN_BASIC_JSON_TPL& j, std::istream& i) = delete;
 #endif
 
-/// @brief user-defined string literal for JSON pointer
-/// @sa https://json.nlohmann.me/api/basic_json/operator_literal_json_pointer/
-JSON_HEDLEY_NON_NULL(1)
-#if !defined(JSON_HEDLEY_GCC_VERSION) || JSON_HEDLEY_GCC_VERSION_CHECK(4,9,0)
-    inline nlohmann::json::json_pointer operator""_json_pointer(const char* s, std::size_t n)
-#else
-    // GCC 4.8 requires a space between "" and suffix
-    inline nlohmann::json::json_pointer operator"" _json_pointer(const char* s, std::size_t n)
-#endif
-{
-    return nlohmann::json::json_pointer(std::string(s, n));
-}
-
-#if defined(__cpp_char8_t)
-inline nlohmann::json::json_pointer operator""_json_pointer(const char8_t* s, std::size_t n)
-{
-    return nlohmann::json::json_pointer(std::string(reinterpret_cast<const char*>(s), n));
-}
-#endif
-
-}  // namespace json_literals
-}  // namespace literals
 NLOHMANN_JSON_NAMESPACE_END
 
 ///////////////////////
@@ -5621,7 +7492,7 @@ namespace std // NOLINT(cert-dcl58-cpp)
 /// @brief hash value for JSON objects
 /// @sa https://json.nlohmann.me/api/basic_json/std_hash/
 NLOHMANN_BASIC_JSON_TPL_DECLARATION
-struct hash<nlohmann::NLOHMANN_BASIC_JSON_TPL> // NOLINT(cert-dcl58-cpp)
+struct hash<nlohmann::NLOHMANN_BASIC_JSON_TPL> // NOLINT(cert-dcl58-cpp,bugprone-std-namespace-modification)
 {
     std::size_t operator()(const nlohmann::NLOHMANN_BASIC_JSON_TPL& j) const
     {
@@ -5654,7 +7525,7 @@ struct less< ::nlohmann::detail::value_t> // do not remove the space after '<', 
 /// @brief exchanges the values of two JSON objects
 /// @sa https://json.nlohmann.me/api/basic_json/std_swap/
 NLOHMANN_BASIC_JSON_TPL_DECLARATION
-inline void swap(nlohmann::NLOHMANN_BASIC_JSON_TPL& j1, nlohmann::NLOHMANN_BASIC_JSON_TPL& j2) noexcept(  // NOLINT(readability-inconsistent-declaration-parameter-name, cert-dcl58-cpp)
+inline void swap(nlohmann::NLOHMANN_BASIC_JSON_TPL& j1, nlohmann::NLOHMANN_BASIC_JSON_TPL& j2) noexcept(  // NOLINT(readability-inconsistent-declaration-parameter-name, cert-dcl58-cpp,bugprone-std-namespace-modification)
     is_nothrow_move_constructible<nlohmann::NLOHMANN_BASIC_JSON_TPL>::value&&                          // NOLINT(misc-redundant-expression,cppcoreguidelines-noexcept-swap,performance-noexcept-swap)
     is_nothrow_move_assignable<nlohmann::NLOHMANN_BASIC_JSON_TPL>::value)
 {
@@ -5668,17 +7539,17 @@ inline void swap(nlohmann::NLOHMANN_BASIC_JSON_TPL& j1, nlohmann::NLOHMANN_BASIC
 /// @brief std::formatter specialization for JSON values
 /// @sa https://json.nlohmann.me/api/basic_json/std_formatter/
 NLOHMANN_BASIC_JSON_TPL_DECLARATION
-struct formatter<nlohmann::NLOHMANN_BASIC_JSON_TPL, char> // NOLINT(cert-dcl58-cpp)
+struct formatter<nlohmann::NLOHMANN_BASIC_JSON_TPL, char> // NOLINT(cert-dcl58-cpp,bugprone-std-namespace-modification)
 {
     // -1 means compact output (dump()); any value >= 0 means pretty-printed
     // output with that many spaces (or indent_char) per level (dump(indent, indent_char)).
     int indent = -1;
     char indent_char = ' ';
 
-    constexpr auto parse(format_parse_context& ctx) -> format_parse_context::iterator
+    constexpr format_parse_context::iterator parse(format_parse_context& ctx)
     {
-        auto it = ctx.begin();
-        const auto end = ctx.end();
+        format_parse_context::iterator it = ctx.begin();
+        const format_parse_context::iterator end = ctx.end();
         constexpr auto is_align = [](char c)
         {
             return c == '<' || c == '>' || c == '^';
@@ -5743,22 +7614,18 @@ struct formatter<nlohmann::NLOHMANN_BASIC_JSON_TPL, char> // NOLINT(cert-dcl58-c
 
 }  // namespace std
 
-#if JSON_USE_GLOBAL_UDLS
-    #if !defined(JSON_HEDLEY_GCC_VERSION) || JSON_HEDLEY_GCC_VERSION_CHECK(4,9,0)
-        using nlohmann::literals::json_literals::operator""_json; // NOLINT(misc-unused-using-decls,google-global-names-in-headers)
-        using nlohmann::literals::json_literals::operator""_json_pointer; //NOLINT(misc-unused-using-decls,google-global-names-in-headers)
-    #else
-        // GCC 4.8 requires a space between "" and suffix
-        using nlohmann::literals::json_literals::operator"" _json; // NOLINT(misc-unused-using-decls,google-global-names-in-headers)
-        using nlohmann::literals::json_literals::operator"" _json_pointer; //NOLINT(misc-unused-using-decls,google-global-names-in-headers)
-    #endif
-#endif
+// keep: undoes the macros defined via detail/macro_scope.hpp at the top of this file; removing it
+// (nothing in this file *uses* a symbol from it) would leak JSON_* macros into every translation
+// unit that includes this header.
+#include <nlohmann/detail/macro_unscope.hpp> // IWYU pragma: keep
 
-#include <nlohmann/detail/macro_unscope.hpp>
-
-// End of GCC diagnostic pragmas for C++ modules support
-#if defined(__GNUC__) && !defined(__clang__) && __cplusplus >= 202002L
-    #pragma GCC diagnostic pop
+// The user-defined string literals are in a separate header, because their
+// bodies instantiate the parser in every translation unit that includes them.
+// Define JSON_NO_AUTOMATIC_UDLS to include <nlohmann/json_literals.hpp> only
+// where needed.
+#ifndef JSON_NO_AUTOMATIC_UDLS
+    // NOLINTNEXTLINE(misc-header-include-cycle): json_literals.hpp includes this header
+    #include <nlohmann/json_literals.hpp>
 #endif
 
 #endif  // INCLUDE_NLOHMANN_JSON_HPP_

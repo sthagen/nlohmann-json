@@ -39,7 +39,7 @@ using nlohmann::json;
 
 template<class K, class V, class dummy_compare, class A>
 using my_workaround_fifo_map = nlohmann::fifo_map<K, V, nlohmann::fifo_map_compare<K>, A>;
-using my_json = nlohmann::basic_json<my_workaround_fifo_map>;
+using my_json = nlohmann::json::with_object_t<my_workaround_fifo_map>;
 
 /////////////////////////////////////////////////////////////////////
 // for #977
@@ -86,8 +86,7 @@ struct foo_serializer < T, typename std::enable_if < !std::is_same<foo, T>::valu
 };
 } // namespace ns
 
-using foo_json = nlohmann::basic_json<std::map, std::vector, std::string, bool, std::int64_t,
-      std::uint64_t, double, std::allocator, ns::foo_serializer, std::vector<std::uint8_t>>;
+using foo_json = nlohmann::json::with_json_serializer_t<ns::foo_serializer>;
 
 /////////////////////////////////////////////////////////////////////
 // for #805
@@ -254,7 +253,7 @@ TEST_CASE("regression tests 1")
     {
         // create JSON class with nonstandard integer number type
         using custom_json =
-            nlohmann::basic_json<std::map, std::vector, std::string, bool, int32_t, uint32_t, float>;
+            nlohmann::json::with_integers_t<std::int32_t, std::uint32_t>::with_float_t<float>;
         custom_json j;
         j["int_1"] = 1;
         CHECK(j["int_1"] == 1);
@@ -470,18 +469,17 @@ TEST_CASE("regression tests 1")
         // create JSON class with nonstandard float number type
 
         // float
-        nlohmann::basic_json<std::map, std::vector, std::string, bool, int32_t, uint32_t, float> const j_float =
+        nlohmann::json::with_integers_t<std::int32_t, std::uint32_t>::with_float_t<float> const j_float =
             1.23e25f;
         CHECK(j_float.get<float>() == 1.23e25f);
 
         // double
-        nlohmann::basic_json<std::map, std::vector, std::string, bool, int64_t, uint64_t, double> const j_double =
+        nlohmann::json const j_double =
             1.23e35;
         CHECK(j_double.get<double>() == 1.23e35);
 
         // long double
-        nlohmann::basic_json<std::map, std::vector, std::string, bool, int64_t, uint64_t, long double>
-        const j_long_double = 1.23e45L;
+        nlohmann::json::with_float_t<long double> const j_long_double = 1.23e45L;
         CHECK(j_long_double.get<long double>() == 1.23e45L);
     }
 
@@ -1018,7 +1016,7 @@ TEST_CASE("regression tests 1")
         };
 
         json _;
-        CHECK_THROWS_WITH_AS(_ = json::from_cbor(vec), "[json.exception.parse_error.113] parse error at byte 2: syntax error while parsing CBOR string: expected length specification (0x60-0x7B) or indefinite string type (0x7F); last byte: 0x98", json::parse_error&);
+        CHECK_THROWS_WITH_AS(_ = json::from_cbor(vec), "[json.exception.parse_error.113] parse error at byte 2: syntax error while parsing CBOR object key: only string keys are supported, but found an array; last byte: 0x98", json::parse_error&);
 
         // related test case: nonempty UTF-8 string (indefinite length)
         std::vector<uint8_t> const vec1 {0x7f, 0x61, 0x61};
@@ -1065,7 +1063,7 @@ TEST_CASE("regression tests 1")
         };
 
         json _;
-        CHECK_THROWS_WITH_AS(_ = json::from_cbor(vec1), "[json.exception.parse_error.113] parse error at byte 13: syntax error while parsing CBOR string: expected length specification (0x60-0x7B) or indefinite string type (0x7F); last byte: 0xB4", json::parse_error&);
+        CHECK_THROWS_WITH_AS(_ = json::from_cbor(vec1), "[json.exception.parse_error.113] parse error at byte 13: syntax error while parsing CBOR object key: only string keys are supported, but found a map; last byte: 0xB4", json::parse_error&);
 
         // related test case: double-precision
         std::vector<uint8_t> const vec2
@@ -1077,7 +1075,7 @@ TEST_CASE("regression tests 1")
             0x96, 0x96, 0xb4, 0xb4, 0xfa, 0x94, 0x94, 0x61,
             0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0xfb
         };
-        CHECK_THROWS_WITH_AS(_ = json::from_cbor(vec2), "[json.exception.parse_error.113] parse error at byte 13: syntax error while parsing CBOR string: expected length specification (0x60-0x7B) or indefinite string type (0x7F); last byte: 0xB4", json::parse_error&);
+        CHECK_THROWS_WITH_AS(_ = json::from_cbor(vec2), "[json.exception.parse_error.113] parse error at byte 13: syntax error while parsing CBOR object key: only string keys are supported, but found a map; last byte: 0xB4", json::parse_error&);
     }
 
     SECTION("issue #452 - Heap-buffer-overflow (OSS-Fuzz issue 585)")
@@ -1482,7 +1480,23 @@ TEST_CASE("regression tests 1")
 
     SECTION("issue #972 - Segmentation fault on G++ when trying to assign json string literal to custom json type")
     {
+        // this assignment used to crash outright
         my_json const foo = R"([1, 2, 3])"_json;
+
+        // fifo_map is the adapter the docs recommend for keeping object keys
+        // in insertion order (see docs/mkdocs/docs/features/object_order.md
+        // and docs/mkdocs/docs/features/types/template_parameters.md); check
+        // that recommendation actually holds, including through erase() and
+        // inserting a new key. The comparator is stateful, so this avoids
+        // deep copies of "order" (see #1763, #5649).
+        my_json order = my_json::parse(R"({"z":1,"a":2,"m":{"y":1,"b":2}})");
+        CHECK(order.dump() == R"({"z":1,"a":2,"m":{"y":1,"b":2}})");
+
+        order.erase("z");
+        CHECK(order.dump() == R"({"a":2,"m":{"y":1,"b":2}})");
+
+        order["new_key"] = 3;
+        CHECK(order.dump() == R"({"a":2,"m":{"y":1,"b":2},"new_key":3})");
     }
 
     SECTION("issue #977 - Assigning between different json types")

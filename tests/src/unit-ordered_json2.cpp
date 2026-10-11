@@ -217,16 +217,7 @@ void int_to_string(alt_string& target, std::size_t value)
     target = std::to_string(value).c_str();
 }
 
-using alt_json = nlohmann::basic_json <
-                 std::map,
-                 std::vector,
-                 alt_string,
-                 bool,
-                 std::int64_t,
-                 std::uint64_t,
-                 double,
-                 std::allocator,
-                 nlohmann::adl_serializer >;
+using alt_json = nlohmann::json::with_string_t<alt_string>;
 
 bool operator<(const char* op1, const alt_string& op2) noexcept
 {
@@ -326,6 +317,15 @@ TEST_CASE("ordered_json across binary formats")
         CHECK(collect_keys(restored) == original_keys);
         CHECK(collect_keys(restored["mango"]) == original_mango_keys);
     }
+
+    SECTION("BON8")
+    {
+        const auto bytes = ordered_json::to_bon8(original);
+        const auto restored = ordered_json::from_bon8(bytes);
+        CHECK(restored == original);
+        CHECK(collect_keys(restored) == original_keys);
+        CHECK(collect_keys(restored["mango"]) == original_mango_keys);
+    }
 }
 
 TEST_CASE("alt_json (custom string_t) across binary formats")
@@ -350,6 +350,13 @@ TEST_CASE("alt_json (custom string_t) across binary formats")
     {
         const auto bytes = alt_json::to_ubjson(original);
         const auto restored = alt_json::from_ubjson(bytes);
+        CHECK(restored == original);
+    }
+
+    SECTION("BON8")
+    {
+        const auto bytes = alt_json::to_bon8(original);
+        const auto restored = alt_json::from_bon8(bytes);
         CHECK(restored == original);
     }
 

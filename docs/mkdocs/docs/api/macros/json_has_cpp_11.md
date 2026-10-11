@@ -40,8 +40,15 @@ The default value is detected based on preprocessor macros such as `#!cpp __cplu
     ...
     ```
 
+## See also
+
+- [JSON_HAS_FILESYSTEM / JSON_HAS_EXPERIMENTAL_FILESYSTEM](json_has_filesystem.md) - control `std::filesystem` support
+- [JSON_HAS_RANGES](json_has_ranges.md) - control `std::ranges` support
+- [JSON_HAS_THREE_WAY_COMPARISON](json_has_three_way_comparison.md) - control 3-way comparison support
+- [JSON_HAS_STD_FORMAT](json_has_std_format.md) - control `std::format`/`std::formatter` support
+
 ## Version history
 
-- Added in version 3.10.5.
+- Added in version 3.10.0.
 - Added `JSON_HAS_CPP_23` in version 3.12.0.
 - Added `JSON_HAS_CPP_26` in version 3.13.0.

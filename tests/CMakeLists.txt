@@ -8,9 +8,9 @@ set(JSON_SIMDUTF_VERSION 9.1.0 CACHE STRING "The simdutf version used by JSON_Te
 
 set(JSON_32bitTest     AUTO CACHE STRING "Enable the 32bit unit test (ON/OFF/AUTO/ONLY).")
 set(JSON_TestStandards "" CACHE STRING "The list of standards to test explicitly.")
+set(JSON_TestShard     "" CACHE STRING "Build only a part of the unit tests, given as <index>/<count> (e.g. 0/2), to split them across CI jobs with a time limit.")
 
 # using an env var, since this will also affect targets executing cmake (such as "ci_test_compiler_default")
-set(JSON_FORCED_GLOBAL_COMPILE_OPTIONS $ENV{JSON_FORCED_GLOBAL_COMPILE_OPTIONS})
 if (NOT "" STREQUAL "$ENV{JSON_FORCED_GLOBAL_COMPILE_OPTIONS}")
     add_compile_options($ENV{JSON_FORCED_GLOBAL_COMPILE_OPTIONS})
 endif()
@@ -75,21 +75,35 @@ target_compile_options(test_main PUBLIC
     #                              is annotated JSON_HEDLEY_NO_RETURN (it always throws), which
     #                              makes MSVC flag the code following its call in binary_reader.hpp
     #                              as unreachable for that instantiation, in both Debug and Release
-    $<$<CXX_COMPILER_ID:MSVC>:/W4;/wd4566;/wd4996;/wd4702>
+    #       Disable warning C4503: decorated name length exceeded, name was truncated; the deep
+    #                              copy support added for #5387 pushes the mangled name of
+    #                              std::allocator_traits<...>::construct for the custom-base-class
+    #                              test's map type past VS2015's limit. The name is only used for
+    #                              debug info, so truncation does not affect the build.
+    #       Disable warning C5285: cannot declare a specialization for 'std::tuple'; MSVC 19.51
+    #                              reports the forward declarations of standard library
+    #                              templates in the vendored doctest.h
+    $<$<CXX_COMPILER_ID:MSVC>:/W4;/wd4566;/wd4996;/wd4702;/wd4503;/wd5285>
     # https://github.com/nlohmann/json/issues/1114
     $<$<CXX_COMPILER_ID:MSVC>:/bigobj> $<$<BOOL:${MINGW}>:-Wa,-mbig-obj>
 
     # https://github.com/nlohmann/json/pull/3229
     $<$<CXX_COMPILER_ID:Intel>:-diag-disable=2196>
 
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-deprecated;-Wno-float-equal>
-    $<$<CXX_COMPILER_ID:GNU>:-Wno-deprecated-declarations>
+    # several tests call deprecated functions on purpose to keep them covered
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-deprecated-declarations>
     $<$<CXX_COMPILER_ID:Intel>:-diag-disable=1786>)
+target_include_directories(test_main SYSTEM PUBLIC
+    thirdparty/doctest)
 target_include_directories(test_main PUBLIC
-    thirdparty/doctest
-    thirdparty/fifo_map
     ${PROJECT_BINARY_DIR}/include)
 target_link_libraries(test_main PUBLIC ${NLOHMANN_JSON_TARGET_NAME})
+
+# thirdparty/fifo_map is only used by the #972 regression test, so only
+# test-regression1 needs it on its include path (see json_test_set_test_options
+# below), rather than every test-* target via test_main.
+add_library(fifo_map_include INTERFACE)
+target_include_directories(fifo_map_include SYSTEM INTERFACE thirdparty/fifo_map)
 
 #############################################################################
 # define test- and standard-specific build settings
@@ -104,7 +118,7 @@ endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # avoid stack overflow, see https://github.com/nlohmann/json/issues/2955
-    json_test_set_test_options("test-cbor;test-msgpack;test-ubjson;test-bjdata;test-binary_formats" LINK_OPTIONS /STACK:4000000)
+    json_test_set_test_options("test-bon8;test-cbor;test-msgpack;test-ubjson;test-bjdata;test-binary_formats" LINK_OPTIONS /STACK:4000000)
 endif()
 
 # disable exceptions for test-disabled_exceptions
@@ -121,8 +135,17 @@ json_test_set_test_options(test-disabled_exceptions
         #$<$<CXX_COMPILER_ID:MSVC>:/EH>
 )
 
-# raise timeout of expensive Unicode test
-json_test_set_test_options(test-unicode4 TEST_PROPERTIES TIMEOUT 3000)
+# only the #972 regression test needs thirdparty/fifo_map on its include path
+json_test_set_test_options(test-regression1 LINK_LIBRARIES fifo_map_include)
+
+# Regression test for GCC's false -Warray-bounds error with JSON_DIAGNOSTICS (#5742, fixed in #5585). It only
+# showed up when optimizing, so build this test with -O3 and the warning as an error.
+# -O3 makes the optimizer-driven warnings of the ci_test_gcc flag set (-Winline,
+# -Wsuggest-attribute=...) fire on the library's inline functions; they are not
+# what this test checks, so turn them off for it.
+json_test_set_test_options(test-diagnostics-optimized
+    COMPILE_OPTIONS $<$<CXX_COMPILER_ID:GNU>:-O3 -Werror=array-bounds -Wno-inline -Wno-suggest-attribute=pure -Wno-suggest-attribute=const>
+)
 
 #############################################################################
 # add unit tests
@@ -272,6 +295,33 @@ elseif(NOT json_32bit_test)
     list(FILTER files EXCLUDE REGEX src/unit-32bit.cpp)
 endif()
 
+# with JSON_TestShard=<index>/<count>, keep every <count>-th unit test file,
+# starting at <index> (the glob is sorted, so the split is stable)
+set(test_shard_index 0)
+if(NOT "${JSON_TestShard}" STREQUAL "")
+    if(NOT JSON_TestShard MATCHES "^([0-9]+)/([1-9][0-9]*)$")
+        message(FATAL_ERROR "JSON_TestShard must be <index>/<count>, e.g. 0/2, not '${JSON_TestShard}'.")
+    endif()
+    set(test_shard_index ${CMAKE_MATCH_1})
+    set(test_shard_count ${CMAKE_MATCH_2})
+    if(NOT test_shard_index LESS test_shard_count)
+        message(FATAL_ERROR "JSON_TestShard: the index must be less than the count, not '${JSON_TestShard}'.")
+    endif()
+    list(LENGTH files test_file_count)
+    set(shard_files "")
+    set(file_position 0)
+    foreach(file ${files})
+        math(EXPR file_shard "${file_position} % ${test_shard_count}")
+        if(file_shard EQUAL test_shard_index)
+            list(APPEND shard_files ${file})
+        endif()
+        math(EXPR file_position "${file_position} + 1")
+    endforeach()
+    set(files ${shard_files})
+    list(LENGTH files shard_file_count)
+    message(STATUS "Test shard ${JSON_TestShard}: ${shard_file_count} of ${test_file_count} unit test files")
+endif()
+
 foreach(file ${files})
     json_test_add_test_for(${file} MAIN test_main CXX_STANDARDS ${test_cxx_standards} ${test_force})
 endforeach()
@@ -288,6 +338,9 @@ if(json_32bit_test_only)
     # Skip all other tests in this file
     return()
 endif()
+
+# the following variants of single test files are only built in the first shard
+if(test_shard_index EQUAL 0)
 
 # test legacy comparison of discarded values
 json_test_set_test_options(test-comparison_legacy
@@ -315,6 +368,8 @@ json_test_add_test_for(src/unit-diagnostic-positions.cpp
     NAME test-diagnostic-positions_only
     MAIN test_main CXX_STANDARDS ${test_cxx_standards} ${test_force}
 )
+
+endif()
 
 # *DO NOT* use json_test_set_test_options() below this line
 

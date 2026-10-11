@@ -18,6 +18,19 @@
 // for some reason including this after the json header leads to linker errors with VS 2017...
 #include <locale>
 
+// skip tests if JSON_DISABLE_TUPLE_REFERENCE_CONVERSION=1 (#2226)
+#if defined(JSON_DISABLE_TUPLE_REFERENCE_CONVERSION) && (JSON_DISABLE_TUPLE_REFERENCE_CONVERSION == 1)
+    #define SKIP_TESTS_FOR_TUPLE_REFERENCE_CONVERSION
+#endif
+
+// clang before 4 and GCC before 5 cannot create a std::tuple of basic_json
+// references at all, with or without JSON_DISABLE_TUPLE_REFERENCE_CONVERSION:
+// the tuple constructors make them instantiate basic_json's conversion operator
+// for libstdc++'s internal tuple bases, which fails hard
+#if (defined(__clang__) && __clang_major__ < 4) || (!defined(__clang__) && defined(__GNUC__) && __GNUC__ < 5)
+    #define SKIP_TESTS_FOR_JSON_REFERENCE_TUPLES
+#endif
+
 #define JSON_TESTS_PRIVATE
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -27,7 +40,10 @@ using ordered_json = nlohmann::ordered_json;
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <list>
+#include <new>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -48,18 +64,7 @@ using ordered_json = nlohmann::ordered_json;
     /////////////////////////////////////////////////////////////////////
     // for #4804
     /////////////////////////////////////////////////////////////////////
-    using json_4804 = nlohmann::basic_json<std::map,        // ObjectType
-    std::vector,     // ArrayType
-    std::string,     // StringType
-    bool,            // BooleanType
-    std::int64_t,    // NumberIntegerType
-    std::uint64_t,   // NumberUnsignedType
-    double,          // NumberFloatType
-    std::allocator,  // AllocatorType
-    nlohmann::adl_serializer,  // JSONSerializer
-    std::vector<std::byte>,    // BinaryType
-    void                       // CustomBaseClass
-    >;
+    using json_4804 = nlohmann::json::with_binary_t<std::vector<std::byte>>;
 #endif
 
 #ifdef JSON_HAS_CPP_20
@@ -91,7 +96,83 @@ DOCTEST_CLANG_SUPPRESS_WARNING("-Wexit-time-destructors")
 // for #1021
 /////////////////////////////////////////////////////////////////////
 
-using float_json = nlohmann::basic_json<std::map, std::vector, std::string, bool, std::int64_t, std::uint64_t, float>;
+using float_json = nlohmann::json::with_float_t<float>;
+
+#if (defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)) && !defined(JSON_NOEXCEPTION)
+namespace
+{
+// An allocator whose allocate() can be told to fail on demand, so tests can
+// check that ~basic_json() tolerates - in fact, after #5135, never even
+// triggers - an allocation failure. This replaces an earlier version of
+// this test that overrode the process-wide ::operator new/::operator
+// delete, which affected every allocation in the whole unit-regression2
+// binary rather than just the values under test.
+std::size_t failing_allocator_allocations = 0;
+std::size_t failing_allocator_deallocations = 0;
+bool fail_next_allocation = false;
+
+template<class T>
+struct failing_allocator : std::allocator<T>
+{
+    using std::allocator<T>::allocator;
+
+    failing_allocator() noexcept = default;
+    template<class U>
+    failing_allocator(const failing_allocator<U>& /*unused*/) noexcept {} // NOLINT(google-explicit-constructor)
+
+    T* allocate(std::size_t n)
+    {
+        if (fail_next_allocation)
+        {
+            fail_next_allocation = false;
+            throw std::bad_alloc();
+        }
+        ++failing_allocator_allocations;
+        return std::allocator<T>::allocate(n);
+    }
+
+    void deallocate(T* p, std::size_t n)
+    {
+        ++failing_allocator_deallocations;
+        std::allocator<T>::deallocate(p, n);
+    }
+
+    template<class U>
+    struct rebind
+    {
+        using other = failing_allocator<U>;
+    };
+};
+
+using failing_json = nlohmann::json::with_allocator_t<failing_allocator>;
+using failing_ordered_json = nlohmann::ordered_json::with_allocator_t<failing_allocator>;
+
+// builds `depth` levels of nesting around a scalar, iteratively (never
+// recursing: each wrap only moves the previous, already-built value, which
+// is O(1)), each level an array or an object depending on `nest_objects`
+template<class BasicJsonType>
+BasicJsonType make_deep_nest(std::size_t depth, bool nest_objects)
+{
+    BasicJsonType v = 0;
+    for (std::size_t i = 0; i < depth; ++i)
+    {
+        if (nest_objects)
+        {
+            BasicJsonType wrapper = BasicJsonType::object();
+            wrapper["x"] = std::move(v);
+            v = std::move(wrapper);
+        }
+        else
+        {
+            BasicJsonType wrapper = BasicJsonType::array();
+            wrapper.push_back(std::move(v));
+            v = std::move(wrapper);
+        }
+    }
+    return v;
+}
+} // namespace
+#endif
 
 /////////////////////////////////////////////////////////////////////
 // for #1647
@@ -112,7 +193,7 @@ enum class for_1647
     two
 };
 
-// NOLINTNEXTLINE(misc-const-correctness,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays): this is a false positive
+// NOLINTNEXTLINE(misc-const-correctness): this is a false positive
 NLOHMANN_JSON_SERIALIZE_ENUM(for_1647,
 {
     {for_1647::one, "one"},
@@ -200,28 +281,6 @@ struct adl_serializer<NonDefaultConstructible>
 }  // namespace nlohmann
 
 /////////////////////////////////////////////////////////////////////
-// for #2824
-/////////////////////////////////////////////////////////////////////
-
-class sax_no_exception : public nlohmann::detail::json_sax_dom_parser<json, nlohmann::detail::string_input_adapter_type>
-{
-  public:
-    explicit sax_no_exception(json& j)
-        : nlohmann::detail::json_sax_dom_parser<json, nlohmann::detail::string_input_adapter_type>(j, false)
-    {}
-
-    static bool parse_error(std::size_t /*position*/, const std::string& /*last_token*/, const json::exception& ex)
-    {
-        error_string = new std::string(ex.what());  // NOLINT(cppcoreguidelines-owning-memory)
-        return false;
-    }
-
-    static std::string* error_string;
-};
-
-std::string* sax_no_exception::error_string = nullptr;
-
-/////////////////////////////////////////////////////////////////////
 // for #2982
 /////////////////////////////////////////////////////////////////////
 
@@ -239,6 +298,52 @@ class my_allocator : public std::allocator<T>
     {
         using other = my_allocator<U>;
     };
+};
+
+/////////////////////////////////////////////////////////////////////
+// for #3669
+/////////////////////////////////////////////////////////////////////
+
+// mimics boost::optional's converting constructor, whose SFINAE check asks
+// whether T is constructible from const U&
+template<class T, class Arg>
+struct issue3669_is_constructible
+{
+    template<class T2, class A2, class = decltype(T2(std::declval<A2>()))>
+    static char test(int);
+    template<class, class>
+    static long test(...);
+    static constexpr bool value = sizeof(test<T, Arg>(0)) == 1;
+};
+
+template<class T>
+class issue3669_optional
+{
+  public:
+    issue3669_optional() = default;
+    template<class U>
+    issue3669_optional(const issue3669_optional<U>& /*unused*/, // NOLINT(google-explicit-constructor,hicpp-explicit-conversions)
+                       typename std::enable_if<issue3669_is_constructible<T, const U&>::value, bool>::type /*unused*/ = true) {}
+};
+
+class Issue3669Dummy
+{
+  public:
+    explicit Issue3669Dummy(const json& /*unused*/) {}
+};
+
+class Issue3669Holder
+{
+    issue3669_optional<Issue3669Dummy> d{};
+
+    // GCC < 11 (C++11/14) rejects a free to_json(json&, const Issue3669Holder&)
+    // here, because ADL for Issue3669Dummy finds it and closes an instantiation
+    // cycle; a hidden friend is only visible to ADL for Issue3669Holder
+    friend void to_json(json& j, const Issue3669Holder& h)
+    {
+        static_cast<void>(h.d); // silence -Wunused-private-field
+        j = "holder";
+    }
 };
 
 TEST_CASE("regression tests 2")
@@ -332,6 +437,7 @@ TEST_CASE("regression tests 2")
         CHECK(float_json::from_cbor(float_json::to_cbor(j)) == j);
         CHECK(float_json::from_msgpack(float_json::to_msgpack(j)) == j);
         CHECK(float_json::from_ubjson(float_json::to_ubjson(j)) == j);
+        CHECK(float_json::from_bon8(float_json::to_bon8(j)) == j);
 
         float_json j2 = {1000.0, 2000.0, 3000.0};
         CHECK(float_json::from_ubjson(float_json::to_ubjson(j2, true, true)) == j2);
@@ -530,7 +636,7 @@ TEST_CASE("regression tests 2")
     SECTION("issue #2067 - cannot serialize binary data to text JSON")
     {
         const std::array<unsigned char, 23> data = {{0x81, 0xA4, 0x64, 0x61, 0x74, 0x61, 0xC4, 0x0F, 0x33, 0x30, 0x30, 0x32, 0x33, 0x34, 0x30, 0x31, 0x30, 0x37, 0x30, 0x35, 0x30, 0x31, 0x30}};
-        const json j = json::from_msgpack(data.data(), data.size());
+        const json j = json::from_msgpack(data.begin(), data.end());
         // dump() is nodiscard; this only checks that dumping does not throw
         CHECK_NOTHROW(
             utils::ignore_return_value(
@@ -540,6 +646,20 @@ TEST_CASE("regression tests 2")
                        json::error_handler_t::strict  // Error
                       )));
     }
+
+#ifndef SKIP_TESTS_FOR_TUPLE_REFERENCE_CONVERSION
+    SECTION("issue #2226 - std::tuple dangling reference - implicit conversion")
+    {
+        // by default, a one-element tuple holding a json reference converts to
+        // a one-element array; JSON_DISABLE_TUPLE_REFERENCE_CONVERSION removes
+        // this conversion (see unit-disable-tuple-reference-conversion.cpp)
+        const json j = true;
+        CHECK(std::is_constructible<json, std::tuple<const json&>>::value);
+#ifndef SKIP_TESTS_FOR_JSON_REFERENCE_TUPLES
+        CHECK(json(std::forward_as_tuple(j)) == json::array({true}));
+#endif
+    }
+#endif
 
     SECTION("PR #2181 - regression bug with lvalue")
     {
@@ -606,7 +726,11 @@ TEST_CASE("regression tests 2")
     SECTION("issue #2546 - parsing containers of std::byte")
     {
         const char DATA[] = R"("Hello, world!")"; // NOLINT(misc-const-correctness,cppcoreguidelines-avoid-c-arrays,hicpp-avoid-c-arrays,modernize-avoid-c-arrays)
-        const auto s = std::as_bytes(std::span(DATA));
+        // exclude the trailing '\0' that string-literal initialization adds to
+        // DATA: std::span(DATA) would span the full array extent (including
+        // that NUL), which is only silently accepted as end-of-input by default
+        // and would fail under JSON_STRICT_NUL_HANDLING
+        const auto s = std::as_bytes(std::span(DATA, sizeof(DATA) - 1));
         const json j = json::parse(s);
         CHECK(j.dump() == "\"Hello, world!\"");
     }
@@ -718,16 +842,6 @@ TEST_CASE("regression tests 2")
         }
     }
 
-    SECTION("issue #2824 - encoding of json::exception::what()")
-    {
-        json j;
-        sax_no_exception sax(j);
-
-        CHECK(!json::sax_parse("xyz", &sax));
-        CHECK(*sax_no_exception::error_string == "[json.exception.parse_error.101] parse error at line 1, column 1: syntax error while parsing value - invalid literal; last read: 'x'");
-        delete sax_no_exception::error_string;  // NOLINT(cppcoreguidelines-owning-memory)
-    }
-
     SECTION("issue #2825 - Properly constrain the basic_json conversion operator")
     {
         static_assert(std::is_copy_assignable<nlohmann::ordered_json>::value, "ordered_json must be copy assignable");
@@ -759,6 +873,43 @@ TEST_CASE("regression tests 2")
         json::to_cbor(j, my_vector);
         json k = json::from_cbor(my_vector);
         CHECK(j == k);
+    }
+
+    SECTION("issue #4552 - UTF-8 invalid characters are not always ignored when dumping with error_handler_t::ignore")
+    {
+        json node;
+        node["test"] = "test\334\005";
+        CHECK(node.dump(-1, ' ', false, json::error_handler_t::ignore) == "{\"test\":\"test\\u0005\"}");
+        CHECK(node.dump(-1, ' ', false, json::error_handler_t::keep) == "{\"test\":\"test\334\\u0005\"}");
+        CHECK(node.dump(-1, ' ', true, json::error_handler_t::keep) == "{\"test\":\"test\334\\u0005\"}");
+    }
+
+#ifdef JSON_HAS_CPP_17
+    SECTION("issue #5066 - MSVC converts json to std::variant<json> via the conversion operator")
+    {
+        // std::variant<json> must not be retrievable via get<>(), because otherwise the
+        // implicit conversion operator becomes a candidate that MSVC picks over the variant's
+        // converting constructor, routing a number through the string from_json overload
+        static_assert(!nlohmann::detail::is_detected<nlohmann::detail::get_template_function, const json&, std::variant<json>>::value,
+                      "std::variant<json> must not be retrievable via get<>()");
+
+        // clang before 7 cannot instantiate libstdc++'s std::variant<json>
+#if !(defined(__clang__) && __clang_major__ < 7)
+        // push_back, not emplace_back: #5066 needs the implicit conversion
+        // from json to the vector's value type
+        std::vector<std::variant<json>> v;
+        v.push_back(json(1)); // NOLINT(hicpp-use-emplace,modernize-use-emplace)
+        CHECK(std::get<0>(v[0]) == 1);
+#endif
+    }
+#endif
+
+    SECTION("issue #3669 - invalid use of incomplete type with optional member and to_json")
+    {
+        const Issue3669Holder h{};
+        const Issue3669Holder h2(h); // NOLINT(performance-unnecessary-copy-initialization)
+        const json j = h2;
+        CHECK(j == "holder");
     }
 
 }
@@ -863,6 +1014,213 @@ TEST_CASE("regression test - excessive binary container size honors allow_except
 
     // regression guard: a genuinely truncated CBOR input must remain discarded
     CHECK(json::from_cbor(std::vector<std::uint8_t> {0x9b, 0, 0, 0, 0, 0, 0, 0, 0x02}, true, false).is_discarded());
+}
+
+#if (defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)) && !defined(JSON_NOEXCEPTION)
+TEST_CASE("regression test #5135 - destructor never allocates, even under memory pressure")
+{
+    // Before the fix, ~basic_json() flattened a nested array/object into a
+    // heap-allocated std::vector to avoid recursing; that allocation could
+    // itself throw bad_alloc, which escapes a noexcept destructor and
+    // terminates the program. destroy() no longer allocates anything, so
+    // none of the sections below ever observe fail_next_allocation being
+    // consumed: CHECK(fail_next_allocation) confirms it was never touched.
+
+    SECTION("the original report: a small, mixed array/object nest")
+    {
+        failing_allocator_allocations = 0;
+        failing_allocator_deallocations = 0;
+        {
+            const failing_json j = failing_json::array(
+            {
+                failing_json::array({1, 2}),
+                failing_json::object({{"key", failing_json::array({3})}})
+            });
+            fail_next_allocation = true;
+        } // j is destroyed here, with every further allocation set to fail
+
+        CHECK(fail_next_allocation);
+        fail_next_allocation = false;
+        CHECK(failing_allocator_deallocations > 0);
+    }
+
+    SECTION("100000-deep nested array")
+    {
+        std::size_t allocations_before = 0;
+        {
+            const auto j = make_deep_nest<failing_json>(100000, false);
+            allocations_before = failing_allocator_allocations;
+            fail_next_allocation = true;
+        }
+
+        CHECK(fail_next_allocation);
+        fail_next_allocation = false;
+        CHECK(failing_allocator_allocations == allocations_before);
+    }
+
+    SECTION("100000-deep nested object")
+    {
+        std::size_t allocations_before = 0;
+        {
+            const auto j = make_deep_nest<failing_json>(100000, true);
+            allocations_before = failing_allocator_allocations;
+            fail_next_allocation = true;
+        }
+
+        CHECK(fail_next_allocation);
+        fail_next_allocation = false;
+        CHECK(failing_allocator_allocations == allocations_before);
+    }
+
+    SECTION("100000-deep nested ordered_json")
+    {
+        std::size_t allocations_before = 0;
+        {
+            const auto j = make_deep_nest<failing_ordered_json>(100000, true);
+            allocations_before = failing_allocator_allocations;
+            fail_next_allocation = true;
+        }
+
+        CHECK(fail_next_allocation);
+        fail_next_allocation = false;
+        CHECK(failing_allocator_allocations == allocations_before);
+    }
+
+    SECTION("wide and deep: 1000 arrays of 1000 elements, each a small nested object")
+    {
+        std::size_t allocations_before = 0;
+        {
+            failing_json wide = failing_json::array();
+            for (std::size_t i = 0; i < 1000; ++i)
+            {
+                failing_json inner = failing_json::array();
+                for (std::size_t k = 0; k < 1000; ++k)
+                {
+                    inner.push_back(failing_json::object({{"a", 1}, {"b", failing_json::array({1, 2, 3})}}));
+                }
+                wide.push_back(std::move(inner));
+            }
+
+            allocations_before = failing_allocator_allocations;
+            fail_next_allocation = true;
+        }
+
+        CHECK(fail_next_allocation);
+        fail_next_allocation = false;
+        CHECK(failing_allocator_allocations == allocations_before);
+    }
+}
+#endif
+
+namespace
+{
+// a single-element chain of `depth` arrays, built iteratively (never
+// recursing: each wrap only moves the previous, already-built value)
+template<class BasicJsonType>
+BasicJsonType make_single_chain(std::size_t depth)
+{
+    BasicJsonType v = 1;
+    for (std::size_t i = 0; i < depth; ++i)
+    {
+        BasicJsonType wrapper = BasicJsonType::array();
+        wrapper.push_back(std::move(v));
+        v = std::move(wrapper);
+    }
+    return v;
+}
+
+// copies value first, to make sure nothing was corrupted by building it,
+// then lets both the copy and the original destruct via normal scope exit
+template<class BasicJsonType>
+void check_destroy_edge_case(const BasicJsonType& value)
+{
+    const BasicJsonType copy = value; // NOLINT(performance-unnecessary-copy-initialization): the copy is the point
+    CHECK(copy == value);
+}
+} // namespace
+
+TEST_CASE_TEMPLATE("regression test #5135 - destroy() edge cases", BasicJsonType, json, ordered_json)
+{
+    using binary_t = typename BasicJsonType::binary_t;
+
+    SECTION("mix of empty objects, empty arrays, non-empty containers, and scalars")
+    {
+        BasicJsonType root = BasicJsonType::array();
+        root.push_back(BasicJsonType::object());
+        root.push_back(BasicJsonType::array());
+        root.push_back(BasicJsonType::object({{"k", 1}}));
+        root.push_back(BasicJsonType::array({1, 2, 3}));
+        root.push_back(nullptr);
+        root.push_back(true);
+        root.push_back(42);
+        root.push_back(3.14);
+        root.push_back("a string");
+        root.push_back(BasicJsonType(binary_t({1, 2, 3})));
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("container child in first position only")
+    {
+        BasicJsonType root = BasicJsonType::array({BasicJsonType::array({1, 2}), 3, 4, 5});
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("container child in last position only")
+    {
+        BasicJsonType root = BasicJsonType::array({1, 2, 3, BasicJsonType::array({4, 5})});
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("container children in first and last position")
+    {
+        BasicJsonType root = BasicJsonType::array({BasicJsonType::array({1}), 2, 3, BasicJsonType::array({4})});
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("single-element chain, 1000 levels deep")
+    {
+        auto root = make_single_chain<BasicJsonType>(1000);
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("top-level empty array")
+    {
+        BasicJsonType root = BasicJsonType::array();
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("top-level empty object")
+    {
+        BasicJsonType root = BasicJsonType::object();
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("object whose last child is a non-empty array whose last child is an empty object")
+    {
+        BasicJsonType inner_array = BasicJsonType::array({1, 2, BasicJsonType::object()});
+        BasicJsonType root = BasicJsonType::object({{"a", 1}, {"b", inner_array}});
+        check_destroy_edge_case(root);
+    }
+
+    SECTION("destruction via erase() on a deeply nested child")
+    {
+        BasicJsonType root = BasicJsonType::array();
+        root.push_back(make_single_chain<BasicJsonType>(500));
+        root.push_back(BasicJsonType::object({{"k", BasicJsonType::array({1, 2, 3})}}));
+        // erase() must destroy the removed subtree without recursing or
+        // allocating beyond what erase() itself needs
+        root.erase(0);
+        CAPTURE(root.size())
+        CHECK(root.size() == 1);
+    }
+
+    SECTION("destruction via assignment on a deep tree")
+    {
+        auto root = make_single_chain<BasicJsonType>(2000);
+        // assigning a new value destroys the old one in place
+        root = nullptr;
+        CHECK(root.is_null());
+    }
 }
 
 DOCTEST_CLANG_SUPPRESS_WARNING_POP

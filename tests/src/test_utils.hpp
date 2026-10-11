@@ -8,8 +8,11 @@
 
 #pragma once
 
+#include <array> // array
 #include <cstdint> // uint8_t
-#include <fstream> // ifstream, istreambuf_iterator, ios
+#include <cstddef> // size_t
+#include <fstream> // ifstream, ios
+#include <iterator> // istream_iterator
 #include <vector> // vector
 
 namespace utils
@@ -23,6 +26,50 @@ namespace utils
 // ordinary function call does.
 template<typename T>
 inline void ignore_return_value(T&& /*unused*/) noexcept {}
+
+// Advance i toward last (inclusive) by stride, always visiting last.
+// stride 7 is coprime to 256, so every low-byte residue is still hit.
+template<typename T>
+T next_integer_sample(T i, T last, T stride)
+{
+    if (i >= last)
+    {
+        return static_cast<T>(last + 1);
+    }
+    if (stride > 0 && i > static_cast<T>(last - stride))
+    {
+        return last;
+    }
+    const T n = static_cast<T>(i + stride);
+    return n < last ? n : last;
+}
+
+// UTF-8 continuation bytes in [lo, hi] that stand in for all of them in the
+// ill-formed UTF-8 tests. Both the lexer's range checks and the serializer's
+// decoder (detail::decode) only distinguish the classes 0x80..0x8F, 0x90..0x9F,
+// and 0xA0..0xBF, so the first and last byte of each class within [lo, hi]
+// exercise every behavior while a test sweeps another byte position through
+// all 256 values (#5418). Define JSON_TEST_UTF8_EXHAUSTIVE to get every byte.
+inline std::vector<int> utf8_continuation_bytes(int lo, int hi)
+{
+    std::vector<int> result;
+#ifdef JSON_TEST_UTF8_EXHAUSTIVE
+    for (int byte = lo; byte <= hi; ++byte)
+    {
+        result.push_back(byte);
+    }
+#else
+    static const std::array<int, 6> class_ends = {{0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF}};
+    for (const int byte : class_ends)
+    {
+        if (lo <= byte && byte <= hi)
+        {
+            result.push_back(byte);
+        }
+    }
+#endif
+    return result;
+}
 
 inline std::vector<std::uint8_t> read_binary_file(const std::string& filename)
 {

@@ -15,7 +15,64 @@ using nlohmann::json;
 #endif
 
 #include <fstream>
+#include <string>
+#include <vector>
 #include "make_test_data_available.hpp"
+
+namespace
+{
+// alternating objects and arrays nested `depth` levels deep, with members that
+// depend on `variant` at some levels, so diffing two variants yields
+// operations on many levels: replacing the innermost value, adding, removing,
+// and (for ordered_json) reordering members, and changing array lengths
+template<typename BasicJsonType>
+BasicJsonType nested(const std::size_t depth, const int variant)
+{
+    BasicJsonType value = variant;
+    for (std::size_t i = 0; i < depth; ++i)
+    {
+        if (i % 2 == 0)
+        {
+            BasicJsonType object = BasicJsonType::object();
+            if ((i + static_cast<std::size_t>(variant)) % 7 == 0)
+            {
+                object["x"] = i;
+            }
+            if (variant == 2 && i % 11 == 0)
+            {
+                object["z"] = "z";
+            }
+            object["a"] = std::move(value);
+            if (variant == 1 && i % 5 == 0)
+            {
+                object["y"] = 1;
+            }
+            value = std::move(object);
+        }
+        else
+        {
+            BasicJsonType array = BasicJsonType::array({std::move(value)});
+            if ((i + static_cast<std::size_t>(variant)) % 3 == 0)
+            {
+                array.push_back(i);
+            }
+            value = std::move(array);
+        }
+    }
+    return value;
+}
+
+// a path of `depth` reference tokens, as nested() nests its values
+std::string nested_path(const std::size_t depth)
+{
+    std::string path;
+    for (std::size_t i = depth; i > 0; --i)
+    {
+        path += (i - 1) % 2 == 0 ? "/a" : "/0";
+    }
+    return path;
+}
+} // namespace
 
 TEST_CASE("JSON patch")
 {
@@ -1656,6 +1713,21 @@ TEST_CASE("JSON patch - move where 'from' is a proper prefix of 'path' (regressi
         CHECK(doc.patch(patch) == R"({"b": 1})"_json);
     }
 
+    SECTION("array index tokens that are not a number")
+    {
+        json const doc = R"({"a": [1, 2]})"_json;
+
+        // "-" cannot be removed and is reported as unresolved
+        json const patch_dash = {{{"op", "remove"}, {"path", "/a/-"}}};
+        CHECK_THROWS_WITH_AS(doc.patch(patch_dash), "[json.exception.out_of_range.404] unresolved reference token '-'", json::out_of_range&);
+
+        // a single character is reported like a longer token
+        json const patch_x = {{{"op", "remove"}, {"path", "/a/x"}}};
+        CHECK_THROWS_WITH_AS(doc.patch(patch_x), "[json.exception.parse_error.109] parse error: array index 'x' is not a number", json::parse_error&);
+        json const patch_xy = {{{"op", "remove"}, {"path", "/a/xy"}}};
+        CHECK_THROWS_WITH_AS(doc.patch(patch_xy), "[json.exception.parse_error.109] parse error: array index 'xy' is not a number", json::parse_error&);
+    }
+
     SECTION("the array-append token '-' is an ordinary child token")
     {
         // "-" (append-to-array) addresses a location *inside* the array,
@@ -1749,5 +1821,248 @@ TEST_CASE("JSON patch - diff emits array removals in descending index order")
         CHECK(patch.front().at("path") == "/999");
         CHECK(patch.back().at("path") == "/0");
         CHECK(source.patch(patch) == target);
+    }
+}
+
+TEST_CASE("JSON patch: diff of deeply nested values")
+{
+    SECTION("the diff reproduces the target at every depth")
+    {
+        // depths on either side of the nesting depth up to which diff()
+        // recurses (detail::recursion_depth_limit(), 128); not every depth up
+        // to 300, as the test would then time out under Valgrind
+        std::vector<std::size_t> depths;
+        for (std::size_t depth = 0; depth <= 16; ++depth)
+        {
+            depths.push_back(depth);
+        }
+        for (std::size_t depth = 120; depth <= 136; ++depth)
+        {
+            depths.push_back(depth);
+        }
+        depths.push_back(300);
+
+        for (const auto depth : depths)
+        {
+            CAPTURE(depth)
+            for (int from = 0; from < 3; ++from)
+            {
+                for (int to = 0; to < 3; ++to)
+                {
+                    CAPTURE(from)
+                    CAPTURE(to)
+                    const auto source = nested<json>(depth, from);
+                    const auto target = nested<json>(depth, to);
+                    const auto patch = json::diff(source, target);
+                    CHECK(source.patch(patch) == target);
+                    CHECK(patch.empty() == (from == to));
+
+                    const auto ordered_source = nested<nlohmann::ordered_json>(depth, from);
+                    const auto ordered_target = nested<nlohmann::ordered_json>(depth, to);
+                    CHECK(ordered_source.patch(nlohmann::ordered_json::diff(ordered_source, ordered_target)) == ordered_target);
+                }
+            }
+        }
+    }
+
+    SECTION("a difference only in the innermost value is one replace operation")
+    {
+        for (std::size_t depth = 0; depth <= 300; ++depth)
+        {
+            CAPTURE(depth)
+            json source = 1;
+            json target = 2;
+            for (std::size_t i = 0; i < depth; ++i)
+            {
+                source = i % 2 == 0 ? json::object({{"a", std::move(source)}}) : json::array({std::move(source)});
+                target = i % 2 == 0 ? json::object({{"a", std::move(target)}}) : json::array({std::move(target)});
+            }
+            CHECK(json::diff(source, target, "/root") == json::array({{{"op", "replace"}, {"path", "/root" + nested_path(depth)}, {"value", 2}}}));
+        }
+    }
+
+    SECTION("values nested too deeply for the call stack (#5393)")
+    {
+        // diff() used to recurse once per nesting level, and compared the
+        // values with operator== on every level. The values are only
+        // parsed and diffed, never copied or compared, since those recurse
+        // too.
+        const std::size_t depth = 100000;
+        for (const bool objects :
+                {
+                    false, true
+                })
+        {
+            CAPTURE(objects)
+            std::string source_text;
+            std::string target_text;
+            std::string equal_text;
+            std::string path;
+            for (std::size_t i = 0; i < depth; ++i)
+            {
+                source_text += objects ? "{\"a\":" : "[";
+                path += objects ? "/a" : "/0";
+            }
+            target_text = source_text + "2";
+            equal_text = source_text + "1";
+            source_text += "1";
+            const std::string closing(depth, objects ? '}' : ']');
+            const auto source = json::parse(source_text + closing);
+
+            const auto patch = json::diff(source, json::parse(target_text + closing));
+            REQUIRE(patch.size() == 1);
+            CHECK(patch[0]["op"] == "replace");
+            CHECK(patch[0]["path"] == path);
+            CHECK(patch[0]["value"] == 2);
+
+            CHECK(json::diff(source, json::parse(equal_text + closing)).empty());
+        }
+    }
+}
+
+TEST_CASE("JSON patch - diff() takes the fast path for non-reorderable object types (regression #5639)")
+{
+    // #5465 added an order check to diff()'s object handling so a
+    // member-by-member diff is only used when it would also reproduce
+    // target's member *order* -- needed for ordered_json, whose object_t
+    // keeps insertion order and whose patch() "add" op appends a new
+    // member at the end. For json's default object_t (std::map, which
+    // orders members by key regardless of insertion history), that check
+    // could still fail: a new key that sorts before an existing common key
+    // makes target's iteration interleave the new key between common keys,
+    // even though nothing else about the object changed. That sent the
+    // whole object through the slow (remove-every-member,
+    // re-add-every-member) path instead of the minimal one.
+    SECTION("json: added key sorts before an existing common key")
+    {
+        const json source = {{"a", 1}, {"c", {{"x", 1}, {"y", 2}}}};
+        const json target = {{"a", 1}, {"b", 0}, {"c", {{"x", 1}, {"y", 2}}}};
+
+        const json patch = json::diff(source, target);
+
+        // only the new key is added; "a" and "c" are left alone instead of
+        // being removed and re-added
+        const json expected = R"([{"op": "add", "path": "/b", "value": 0}])"_json;
+        CHECK(patch == expected);
+        CHECK(source.patch(patch) == target);
+    }
+
+    SECTION("ordered_json: reordering behavior from #5465 is unchanged")
+    {
+        using nlohmann::ordered_json;
+
+        // same key/value shape as the json case above, but for ordered_json
+        // the *target*'s member order must be reproduced, so the slow path
+        // is still required here.
+        ordered_json source;
+        source["a"] = 1;
+        source["c"] = ordered_json{{"x", 1}, {"y", 2}};
+
+        ordered_json target;
+        target["a"] = 1;
+        target["b"] = 0;
+        target["c"] = ordered_json{{"x", 1}, {"y", 2}};
+
+        const ordered_json patch = ordered_json::diff(source, target);
+
+        // unlike the json case: every member is still removed and re-added
+        // so the result ends up in target's order (2 removes + 3 adds)
+        CHECK(patch.size() == 5);
+        CHECK(source.patch(patch) == target);
+    }
+}
+
+TEST_CASE("JSON patch - every operation on ordered_json")
+{
+    using nlohmann::ordered_json;
+
+    const ordered_json doc = {{"foo", "bar"}, {"arr", {1, 2, 3}}, {"obj", {{"a", 1}}}};
+
+    SECTION("successful operations")
+    {
+        const ordered_json patch = ordered_json::parse(R"([
+            {"op": "add", "path": "/obj/b", "value": 2},
+            {"op": "add", "path": "/arr/1", "value": 9},
+            {"op": "add", "path": "/arr/-", "value": 4},
+            {"op": "remove", "path": "/arr/0"},
+            {"op": "remove", "path": "/obj/a"},
+            {"op": "replace", "path": "/foo", "value": "baz"},
+            {"op": "move", "from": "/foo", "path": "/moved"},
+            {"op": "copy", "from": "/obj", "path": "/copied"},
+            {"op": "test", "path": "/copied/b", "value": 2}
+        ])");
+
+        const ordered_json expected = ordered_json::parse(R"({
+            "arr": [9, 2, 3, 4], "obj": {"b": 2}, "moved": "baz", "copied": {"b": 2}
+        })");
+
+        CHECK(doc.patch(patch) == expected);
+
+        // adding to the root replaces the document
+        CHECK(doc.patch(ordered_json::parse(R"([{"op": "add", "path": "", "value": [1]}])")) == ordered_json({1}));
+    }
+
+    SECTION("failing operations")
+    {
+        ordered_json _;
+#if JSON_DIAGNOSTICS
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "add", "path": "/arr/4", "value": 1}])")),
+                             "[json.exception.out_of_range.401] (/arr) array index 4 is out of range", ordered_json::out_of_range&);
+#else
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "add", "path": "/arr/4", "value": 1}])")),
+                             "[json.exception.out_of_range.401] array index 4 is out of range", ordered_json::out_of_range&);
+#endif
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "add", "path": "/nope/x", "value": 1}])")),
+                             "[json.exception.out_of_range.403] key 'nope' not found", ordered_json::out_of_range&);
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "remove", "path": "/obj/nope"}])")),
+                             "[json.exception.out_of_range.403] key 'nope' not found", ordered_json::out_of_range&);
+#if JSON_DIAGNOSTICS
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "remove", "path": "/arr/3"}])")),
+                             "[json.exception.out_of_range.401] (/arr) array index 3 is out of range", ordered_json::out_of_range&);
+#else
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "remove", "path": "/arr/3"}])")),
+                             "[json.exception.out_of_range.401] array index 3 is out of range", ordered_json::out_of_range&);
+#endif
+#if JSON_DIAGNOSTICS
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "test", "path": "/foo", "value": "qux"}])")),
+                             "[json.exception.other_error.501] (/0) unsuccessful: {\"op\":\"test\",\"path\":\"/foo\",\"value\":\"qux\"}", ordered_json::other_error&);
+#elif JSON_DIAGNOSTIC_POSITIONS
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "test", "path": "/foo", "value": "qux"}])")),
+                             "[json.exception.other_error.501] (bytes 1-47) unsuccessful: {\"op\":\"test\",\"path\":\"/foo\",\"value\":\"qux\"}", ordered_json::other_error&);
+#else
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "test", "path": "/foo", "value": "qux"}])")),
+                             "[json.exception.other_error.501] unsuccessful: {\"op\":\"test\",\"path\":\"/foo\",\"value\":\"qux\"}", ordered_json::other_error&);
+#endif
+#if JSON_DIAGNOSTICS
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "add", "path": "/foo"}])")),
+                             "[json.exception.parse_error.105] parse error: (/0) operation 'add' must have member 'value'", ordered_json::parse_error&);
+#elif JSON_DIAGNOSTIC_POSITIONS
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "add", "path": "/foo"}])")),
+                             "[json.exception.parse_error.105] parse error: (bytes 1-30) operation 'add' must have member 'value'", ordered_json::parse_error&);
+#else
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "add", "path": "/foo"}])")),
+                             "[json.exception.parse_error.105] parse error: operation 'add' must have member 'value'", ordered_json::parse_error&);
+#endif
+        CHECK_THROWS_WITH_AS(_ = doc.patch(ordered_json::parse(R"([{"op": "move", "from": "/obj", "path": "/obj/a/b"}])")),
+                             "[json.exception.out_of_range.414] cannot move value: 'from' path '/obj' is a proper prefix of 'path' '/obj/a/b'", ordered_json::out_of_range&);
+    }
+
+    SECTION("diff reproduces the target")
+    {
+        const ordered_json source = {{"a", 1}, {"b", 2}, {"c", {{"x", 1}}}, {"l", {1, 2, 3}}};
+        const std::vector<ordered_json> targets =
+        {
+            // a key removed, a key added, a nested change, a shorter array
+            {{"a", 1}, {"c", {{"x", 2}}}, {"l", {1}}, {"d", 4}},
+            // the same keys in another order
+            {{"c", {{"x", 1}}}, {"a", 1}, {"b", 2}, {"l", {1, 2, 3}}},
+            // new keys ahead of the common ones
+            {{"new", true}, {"a", 1}, {"b", 3}, {"c", {{"x", 1}}}, {"l", {1, 2, 3}}},
+        };
+        for (const auto& target : targets)
+        {
+            CAPTURE(target.dump())
+            CHECK(source.patch(ordered_json::diff(source, target)) == target);
+        }
     }
 }

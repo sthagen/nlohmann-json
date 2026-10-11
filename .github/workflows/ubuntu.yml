@@ -31,6 +31,51 @@ jobs:
       - name: Build
         run: cmake --build build --target ci_test_gcc
 
+  ci_meson_install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get latest CMake and ninja
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+      - name: Check that Meson and pkg-config offer the CMake options
+        run: make check_build_options
+      - name: Install Meson
+        run: pip install meson
+      - name: Install with Meson
+        run: |
+          meson setup build-meson --prefix=${{ github.workspace }}/install
+          meson install -C build-meson
+      - name: Use the installed package with find_package
+        run: |
+          cmake -S tests/cmake_import/project -B build-import -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install
+          cmake --build build-import
+      - name: Install with Meson and non-default options
+        run: |
+          meson setup build-meson-options --prefix=${{ github.workspace }}/install-options -DMultipleHeaders=true -DDiagnostics=true -DGlobalUDLs=false -DDisableTupleReferenceConversion=true -DStrictBinaryUTF8=true -DDeleteDeprecatedFunctions=true
+          meson install -C build-meson-options
+      - name: Check that the options reach the installed files
+        run: |
+          test -d install-options/include/nlohmann/detail
+          cflags=$(PKG_CONFIG_PATH=${{ github.workspace }}/install-options/share/pkgconfig pkg-config --cflags nlohmann_json)
+          echo "$cflags"
+          echo "$cflags" | grep -q -- '-DJSON_DIAGNOSTICS=1'
+          echo "$cflags" | grep -q -- '-DJSON_USE_GLOBAL_UDLS=0'
+          echo "$cflags" | grep -q -- '-DJSON_DISABLE_TUPLE_REFERENCE_CONVERSION=1'
+          echo "$cflags" | grep -q -- '-DJSON_STRICT_BINARY_UTF8=1'
+          echo "$cflags" | grep -q -- '-DJSON_DELETE_DEPRECATED_FUNCTIONS=1'
+          grep -q 'JSON_USE_GLOBAL_UDLS=0;JSON_DISABLE_TUPLE_REFERENCE_CONVERSION=1;JSON_DIAGNOSTICS=1' install-options/share/cmake/nlohmann_json/nlohmann_jsonTargets.cmake
+          grep -q 'JSON_STRICT_BINARY_UTF8=1;JSON_DELETE_DEPRECATED_FUNCTIONS=1' install-options/share/cmake/nlohmann_json/nlohmann_jsonTargets.cmake
+          cmake -S tests/cmake_import/project -B build-import-options -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install-options
+          cmake --build build-import-options
+      - name: Install with Meson and the include directory outside the prefix
+        run: |
+          meson setup build-meson-split --prefix=${{ github.workspace }}/install-split --includedir=${{ github.workspace }}/install-split-dev/include
+          meson install -C build-meson-split
+          cmake -S tests/cmake_import/project -B build-import-split -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install-split
+          cmake --build build-import-split
+
   ci_infer:
     runs-on: ubuntu-latest
     steps:
@@ -52,12 +97,19 @@ jobs:
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
         run: cmake --build build --target ci_infer
+      - name: Archive Infer report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: infer-report
+          path: ${{ github.workspace }}/build/build_infer/infer-out/report.txt
+          if-no-files-found: ignore
 
   ci_static_analysis_ubuntu:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ci_test_amalgamation, ci_test_single_header, ci_cppcheck, ci_cpplint, ci_reproducible_tests, ci_non_git_tests, ci_offline_testdata, ci_reuse_compliance, ci_test_valgrind]
+        target: [ci_test_single_header, ci_cppcheck, ci_cpplint, ci_reproducible_tests, ci_non_git_tests, ci_offline_testdata, ci_reuse_compliance, ci_test_valgrind]
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -65,6 +117,7 @@ jobs:
           egress-policy: audit
 
       - name: Install Valgrind
+        if: matrix.target == 'ci_test_valgrind'
         run: sudo apt-get update ; sudo apt-get install -y valgrind
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,7 +131,7 @@ jobs:
 
   ci_static_analysis_clang:
     runs-on: ubuntu-latest
-    container: silkeh/clang:dev
+    container: silkeh/clang:22
     strategy:
       matrix:
         target: [ci_test_clang, ci_clang_tidy, ci_test_clang_sanitizer, ci_clang_analyze, ci_single_binaries]
@@ -97,13 +150,20 @@ jobs:
 
   ci_cmake_options:
     runs-on: ubuntu-latest
-    container: ubuntu:focal
+    container: ubuntu:24.04
     strategy:
       matrix:
-        target: [ci_cmake_flags, ci_test_diagnostics, ci_test_diagnostic_positions, ci_test_noexceptions, ci_test_noimplicitconversions, ci_test_legacycomparison, ci_test_noglobaludls, ci_test_disableenumserialization, ci_test_skiplibraryversioncheck, ci_test_simdutf]
+        target: [ci_cmake_flags, ci_test_diagnostics, ci_test_diagnostic_positions, ci_test_noexceptions, ci_test_noimplicitconversions, ci_test_legacycomparison, ci_test_noglobaludls, ci_test_disableenumserialization, ci_test_disabletuplereferenceconversion, ci_test_skiplibraryversioncheck, ci_test_simdutf, ci_test_strict_nul_handling, ci_test_delete_deprecated_functions, ci_test_no_thread_local]
     steps:
       - name: Install build-essential
-        run: apt-get update ; apt-get install -y build-essential unzip wget git libssl-dev
+        run: apt-get update ; apt-get install -y build-essential unzip wget git
+      # the CMake 3.5.0 release binary that ci_cmake_flags downloads links
+      # against libidn.so.11, which Ubuntu 24.04 no longer ships
+      - name: Install libidn11 for CMake 3.5.0
+        if: matrix.target == 'ci_cmake_flags'
+        run: |
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/libi/libidn/libidn11_1.33-2.2ubuntu2_amd64.deb
+          dpkg -i libidn11_1.33-2.2ubuntu2_amd64.deb
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -195,7 +255,7 @@ jobs:
     strategy:
       matrix:
         # older GCC docker images (4, 5, 6) fail to check out code
-        compiler: ['7', '8', '9', '10', '11', '12', '13', '14', '15', 'latest']
+        compiler: ['7', '8', '9', '10', '11', '12', '13', '14', '15', '16', 'latest']
     container: gcc:${{ matrix.compiler }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -220,7 +280,7 @@ jobs:
           persist-credentials: false
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
-      - name: Set env FORCE_STDCPPFS_FLAG for clang 7 / 8 / 9 / 10
+      - name: Disable filesystem support (std::filesystem is unusable) for clang 7 / 8 / 9 / 10
         run: echo "JSON_FORCED_GLOBAL_COMPILE_OPTIONS=-DJSON_HAS_FILESYSTEM=0;-DJSON_HAS_EXPERIMENTAL_FILESYSTEM=0" >> "$GITHUB_ENV"
         if: ${{ matrix.compiler == '7' || matrix.compiler == '8' || matrix.compiler == '9' || matrix.compiler == '10' }}
       - name: Run CMake
@@ -346,6 +406,8 @@ jobs:
     container: intel/oneapi-hpckit:latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
       - name: Run CMake
@@ -358,6 +420,8 @@ jobs:
     container: nvcr.io/nvidia/nvhpc:25.5-devel-cuda12.9-ubuntu22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Get latest CMake and ninja
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
       - name: Run CMake
@@ -389,7 +453,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [ci_test_examples, ci_test_build_documentation]
+        target: [ci_test_examples, ci_test_build_documentation, ci_test_documentation_mermaid]
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
@@ -399,7 +463,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # the git-revision-date-localized plugin needs the history; a shallow clone makes the strict build fail
+          fetch-depth: ${{ matrix.target == 'ci_test_build_documentation' && '0' || '1' }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.target == 'ci_test_documentation_mermaid'
+        with:
+          node-version: 24
       - name: Run CMake
         run: cmake -S . -B build -DJSON_CI=On
       - name: Build
         run: cmake --build build --target ${{ matrix.target }}
+
+  # Native Linux ARM64 runner with the latest GCC. The ubuntu-24.04-arm label is
+  # only available for public repositories.
+  ci_test_arm64:
+    runs-on: ubuntu-24.04-arm
+    container: gcc:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get latest CMake and ninja
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+      - name: Check that the job runs natively on arm64
+        run: uname -m && test "$(uname -m)" = aarch64
+      - name: Run CMake
+        run: cmake -S . -B build -DJSON_CI=On
+      - name: Build
+        run: cmake --build build --target ci_test_compiler_default

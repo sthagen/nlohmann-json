@@ -30,7 +30,7 @@ endif ()
 option(NLOHMANN_JSON_BUILD_MODULES "Build C++ modules support" OFF)
 
 if(NLOHMANN_JSON_BUILD_MODULES)
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+    if(NOT CMAKE_VERSION VERSION_LESS 3.28)
         message(STATUS "Building nlohmann.json C++ module")
         add_subdirectory(src/modules)
     else()
@@ -42,8 +42,11 @@ endif()
 ## OPTIONS
 ##
 
+# Build the tests by default only for the main project and only if the tests
+# directory exists (the release archive json.tar.xz does not contain it).
 # VERSION_GREATER_EQUAL is not available in older CMake (< 3.7)
-if(${MAIN_PROJECT} AND (${CMAKE_VERSION} VERSION_EQUAL 3.13 OR ${CMAKE_VERSION} VERSION_GREATER 3.13))
+if(${MAIN_PROJECT} AND (${CMAKE_VERSION} VERSION_EQUAL 3.13 OR ${CMAKE_VERSION} VERSION_GREATER 3.13)
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     set(JSON_BuildTests_INIT ON)
 else()
     set(JSON_BuildTests_INIT OFF)
@@ -55,10 +58,14 @@ option(JSON_Diagnostic_Positions           "Enable diagnostic positions." OFF)
 option(JSON_GlobalUDLs                     "Place user-defined string literals in the global namespace." ON)
 option(JSON_ImplicitConversions            "Enable implicit conversions." ON)
 option(JSON_DisableEnumSerialization       "Disable default integer enum serialization." OFF)
+option(JSON_DisableTupleReferenceConversion "Disable conversion from a one-element tuple of a JSON reference." OFF)
 option(JSON_LegacyDiscardedValueComparison "Enable legacy discarded value comparison." OFF)
 option(JSON_Install                        "Install CMake targets during install step." ${MAIN_PROJECT})
 option(JSON_MultipleHeaders                "Use non-amalgamated version of the library." ON)
 option(JSON_SystemInclude                  "Include as system headers (skip for clang-tidy)." OFF)
+option(JSON_StrictNulHandling              "Build with strict NUL-byte handling enabled." OFF)
+option(JSON_StrictBinaryUTF8               "Build with UTF-8 checks in the CBOR, UBJSON, BJData, and BSON writers enabled." OFF)
+option(JSON_DeleteDeprecatedFunctions      "Delete the deprecated functions instead of only deprecating them." OFF)
 
 if (JSON_CI)
     include(ci)
@@ -100,12 +107,28 @@ if (JSON_DisableEnumSerialization)
     message(STATUS "Enum integer serialization is disabled (JSON_DISABLE_ENUM_SERIALIZATION=1)")
 endif()
 
+if (JSON_DisableTupleReferenceConversion)
+    message(STATUS "Tuple reference conversion is disabled (JSON_DISABLE_TUPLE_REFERENCE_CONVERSION=1)")
+endif()
+
 if (JSON_LegacyDiscardedValueComparison)
     message(STATUS "Legacy discarded value comparison enabled (JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1)")
 endif()
 
 if (JSON_Diagnostics)
     message(STATUS "Diagnostics enabled (JSON_DIAGNOSTICS=1)")
+endif()
+
+if (JSON_StrictNulHandling)
+    message(STATUS "Strict NUL-byte handling enabled (JSON_STRICT_NUL_HANDLING=1)")
+endif()
+
+if (JSON_StrictBinaryUTF8)
+    message(STATUS "Strict UTF-8 checks in binary writers enabled (JSON_STRICT_BINARY_UTF8=1)")
+endif()
+
+if (JSON_DeleteDeprecatedFunctions)
+    message(STATUS "Deprecated functions are deleted (JSON_DELETE_DEPRECATED_FUNCTIONS=1)")
 endif()
 
 if (JSON_Diagnostic_Positions)
@@ -138,9 +161,13 @@ target_compile_definitions(
     $<$<NOT:$<BOOL:${JSON_GlobalUDLs}>>:JSON_USE_GLOBAL_UDLS=0>
     $<$<NOT:$<BOOL:${JSON_ImplicitConversions}>>:JSON_USE_IMPLICIT_CONVERSIONS=0>
     $<$<BOOL:${JSON_DisableEnumSerialization}>:JSON_DISABLE_ENUM_SERIALIZATION=1>
+    $<$<BOOL:${JSON_DisableTupleReferenceConversion}>:JSON_DISABLE_TUPLE_REFERENCE_CONVERSION=1>
     $<$<BOOL:${JSON_Diagnostics}>:JSON_DIAGNOSTICS=1>
     $<$<BOOL:${JSON_Diagnostic_Positions}>:JSON_DIAGNOSTIC_POSITIONS=1>
     $<$<BOOL:${JSON_LegacyDiscardedValueComparison}>:JSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1>
+    $<$<BOOL:${JSON_StrictNulHandling}>:JSON_STRICT_NUL_HANDLING=1>
+    $<$<BOOL:${JSON_StrictBinaryUTF8}>:JSON_STRICT_BINARY_UTF8=1>
+    $<$<BOOL:${JSON_DeleteDeprecatedFunctions}>:JSON_DELETE_DEPRECATED_FUNCTIONS=1>
 )
 
 target_include_directories(
@@ -162,7 +189,39 @@ if (MSVC)
     )
 endif()
 
-# Install a pkg-config file, so other tools can find this.
+# Install a pkg-config file, so other tools can find this. It carries the same
+# compile definitions as the target above.
+set(NLOHMANN_JSON_PKGCONFIG_CFLAGS "")
+if (NOT JSON_GlobalUDLs)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_USE_GLOBAL_UDLS=0")
+endif()
+if (NOT JSON_ImplicitConversions)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_USE_IMPLICIT_CONVERSIONS=0")
+endif()
+if (JSON_DisableEnumSerialization)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_DISABLE_ENUM_SERIALIZATION=1")
+endif()
+if (JSON_DisableTupleReferenceConversion)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_DISABLE_TUPLE_REFERENCE_CONVERSION=1")
+endif()
+if (JSON_Diagnostics)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_DIAGNOSTICS=1")
+endif()
+if (JSON_Diagnostic_Positions)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_DIAGNOSTIC_POSITIONS=1")
+endif()
+if (JSON_LegacyDiscardedValueComparison)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_USE_LEGACY_DISCARDED_VALUE_COMPARISON=1")
+endif()
+if (JSON_StrictNulHandling)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_STRICT_NUL_HANDLING=1")
+endif()
+if (JSON_StrictBinaryUTF8)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_STRICT_BINARY_UTF8=1")
+endif()
+if (JSON_DeleteDeprecatedFunctions)
+    string(APPEND NLOHMANN_JSON_PKGCONFIG_CFLAGS " -DJSON_DELETE_DEPRECATED_FUNCTIONS=1")
+endif()
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc"

@@ -12,6 +12,11 @@
 #include <nlohmann/json.hpp>
 using nlohmann::json;
 
+#include <valarray>
+#if JSON_HAS_RANGES
+    #include <ranges>
+#endif
+
 namespace
 {
 // special test case to check if memory is leaked if constructor throws
@@ -37,19 +42,18 @@ struct bad_allocator : std::allocator<T>
 };
 } // namespace
 
+TEST_CASE("get_allocator")
+{
+    const auto alloc = nlohmann::json::get_allocator();
+    CHECK(alloc == std::allocator<nlohmann::json>());
+}
+
 TEST_CASE("bad_alloc")
 {
     SECTION("bad_alloc")
     {
         // create JSON type using the throwing allocator
-        using bad_json = nlohmann::basic_json<std::map,
-              std::vector,
-              std::string,
-              bool,
-              std::int64_t,
-              std::uint64_t,
-              double,
-              bad_allocator>;
+        using bad_json = nlohmann::json::with_allocator_t<bad_allocator>;
 
         // creating an object should throw
         CHECK_THROWS_AS(bad_json(bad_json::value_t::object), std::bad_alloc&);
@@ -123,14 +127,7 @@ void my_allocator_clean_up(T* p)
 TEST_CASE("controlled bad_alloc")
 {
     // create JSON type using the throwing allocator
-    using my_json = nlohmann::basic_json<std::map,
-          std::vector,
-          std::string,
-          bool,
-          std::int64_t,
-          std::uint64_t,
-          double,
-          my_allocator>;
+    using my_json = nlohmann::json::with_allocator_t<my_allocator>;
 
     SECTION("class json_value")
     {
@@ -216,7 +213,319 @@ TEST_CASE("controlled bad_alloc")
             CHECK_THROWS_AS(my_json(s), std::bad_alloc&);
             next_construct_fails = false;
         }
+
+        SECTION("basic_json(const basic_json&) of a deeply nested value (#5387)")
+        {
+            // Copying a value nested deeper than the descent bound builds the
+            // copy from the top down: every value whose own copy has not been
+            // made yet stays a null value until it is. Failing an allocation
+            // part-way through is what proves such a half-built copy can still
+            // be destroyed.
+            //
+            // Which path the failure lands in depends on the build: the first
+            // allocation of a copy belongs to the outermost level, so here it
+            // is the descending one. Built with JSON_NO_THREAD_LOCAL - as the
+            // ci_test_no_thread_local target builds the whole suite - no
+            // descent is made at all and the very same failure lands in the
+            // iterative path instead, part-way through its worklist.
+            const auto check_deep_copy = [](bool objects)
+            {
+                CAPTURE(objects)
+
+                next_construct_fails = false;
+
+                // deeper than the 128 levels the copy constructor descends into
+                const std::size_t depth = 300;
+
+                my_json j = 1;
+                for (std::size_t i = 0; i < depth; ++i)
+                {
+                    if (objects)
+                    {
+                        my_json wrapper = my_json::object();
+                        wrapper["a"] = std::move(j);
+                        j = std::move(wrapper);
+                    }
+                    else
+                    {
+                        j = my_json::array({std::move(j)});
+                    }
+                }
+
+                // NOLINTNEXTLINE(performance-unnecessary-copy-initialization): the copy is what is tested
+                CHECK_NOTHROW(my_json(j));
+
+                next_construct_fails = true;
+                // NOLINTNEXTLINE(performance-unnecessary-copy-initialization): the copy is what is tested
+                CHECK_THROWS_AS(my_json(j), std::bad_alloc&);
+                next_construct_fails = false;
+            };
+
+            check_deep_copy(false);
+            check_deep_copy(true);
+        }
     }
+}
+
+namespace
+{
+// counts every allocation made on behalf of a basic_json value (of its own
+// object_t/array_t/string_t/binary_t or of its own type), and can be told to
+// fail one of them: the n-th call to allocate() throws std::bad_alloc instead
+// of allocating, whichever type it is allocating for
+std::size_t alloc_call_count = 0;
+long fail_at_alloc_call = -1; // -1: never fail
+
+template<class T>
+struct nth_alloc_fails_allocator : std::allocator<T>
+{
+    using std::allocator<T>::allocator;
+
+    T* allocate(std::size_t n)
+    {
+        const auto index = alloc_call_count++;
+        if (fail_at_alloc_call >= 0 && index == static_cast<std::size_t>(fail_at_alloc_call))
+        {
+            throw std::bad_alloc();
+        }
+        return std::allocator<T>::allocate(n);
+    }
+
+    template <class U>
+    struct rebind
+    {
+        using other = nth_alloc_fails_allocator<U>;
+    };
+};
+
+// builds a value nested more than 128 levels deep - the bound the copy
+// constructor descends into before it continues without the call stack - and
+// checks that a copy survives any single allocation of it failing: every
+// attempt either throws std::bad_alloc, without crashing or leaving the
+// source altered, or completes the copy
+template<class BasicJsonType>
+void check_deep_copy_survives_failing_allocation(bool nest_objects)
+{
+    CAPTURE(nest_objects)
+
+    fail_at_alloc_call = -1;
+
+    // [[[ ... [1] ... ]]], or the same nesting with objects, 130 levels deep
+    BasicJsonType src = 1;
+    for (std::size_t i = 0; i < 130; ++i)
+    {
+        if (nest_objects)
+        {
+            BasicJsonType wrapper = BasicJsonType::object();
+            wrapper["a"] = std::move(src);
+            src = std::move(wrapper);
+        }
+        else
+        {
+            src = BasicJsonType::array({std::move(src)});
+        }
+    }
+
+    const std::string original_dump = src.dump();
+
+    // first measure how many allocations an unhindered copy takes
+    alloc_call_count = 0;
+    {
+        // NOLINTNEXTLINE(performance-unnecessary-copy-initialization): the copy is what is measured
+        const BasicJsonType measure(src);
+    }
+    const std::size_t total_allocations = alloc_call_count;
+    REQUIRE(total_allocations > 0);
+    REQUIRE(src.dump() == original_dump);
+
+    // let the 0th, 1st, 2nd, ... allocation of the copy fail in turn; every
+    // such copy must throw std::bad_alloc rather than crash, and the source
+    // must come out exactly as it went in
+    for (std::size_t n = 0; n < total_allocations; ++n)
+    {
+        CAPTURE(n)
+        alloc_call_count = 0;
+        fail_at_alloc_call = static_cast<long>(n);
+
+        CHECK_THROWS_AS(BasicJsonType(src), std::bad_alloc&);
+
+        fail_at_alloc_call = -1;
+        CHECK(src.dump() == original_dump);
+    }
+
+    // once no allocation is made to fail, the copy itself must succeed
+    fail_at_alloc_call = -1;
+    const BasicJsonType copy(src);
+    CHECK(copy.dump() == original_dump);
+    CHECK(src.dump() == original_dump);
+}
+} // namespace
+
+TEST_CASE("copy of a deeply nested value survives a failing allocation (#5640)")
+{
+    // With iterator debugging (MSVC STL debug builds, also used by clang-cl),
+    // containers allocate a debug proxy through the allocator inside their
+    // noexcept move constructors, so failing that allocation terminates the
+    // program instead of throwing std::bad_alloc. Nothing to check there.
+#if !(defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL > 0)
+    SECTION("std::map-backed object_t")
+    {
+        using bad_alloc_json = nlohmann::json::with_allocator_t<nth_alloc_fails_allocator>;
+
+        check_deep_copy_survives_failing_allocation<bad_alloc_json>(false);
+        check_deep_copy_survives_failing_allocation<bad_alloc_json>(true);
+    }
+
+    SECTION("ordered_map-backed object_t")
+    {
+        using bad_alloc_ordered_json = nlohmann::ordered_json::with_allocator_t<nth_alloc_fails_allocator>;
+
+        check_deep_copy_survives_failing_allocation<bad_alloc_ordered_json>(false);
+        check_deep_copy_survives_failing_allocation<bad_alloc_ordered_json>(true);
+    }
+#endif
+}
+
+namespace
+{
+// counts the allocations of pairs with a non-const first member: the object
+// types store std::pair<const Key, T>, so only the scratch space of the
+// iterative deep copy allocates std::pair<Key, T>
+std::size_t scratch_pair_allocations = 0;
+
+template<class T>
+struct is_scratch_pair : std::false_type {};
+
+template<class K, class V>
+struct is_scratch_pair<std::pair<K, V>> : std::integral_constant < bool, !std::is_const<K>::value > {};
+
+template<class T>
+struct scratch_counting_allocator : std::allocator<T>
+{
+    using std::allocator<T>::allocator;
+
+    T* allocate(std::size_t n)
+    {
+        if (is_scratch_pair<T>::value)
+        {
+            ++scratch_pair_allocations;
+        }
+        return std::allocator<T>::allocate(n);
+    }
+
+#ifdef __cpp_lib_allocate_at_least
+    // std::allocator<T>::allocate_at_least would bypass the counting, and
+    // libc++'s containers prefer it over allocate from C++23 on
+    auto allocate_at_least(std::size_t n)
+    {
+        if (is_scratch_pair<T>::value)
+        {
+            ++scratch_pair_allocations;
+        }
+        return std::allocator<T>::allocate_at_least(n);
+    }
+#endif
+
+    template <class U>
+    struct rebind
+    {
+        using other = scratch_counting_allocator<U>;
+    };
+};
+} // namespace
+
+TEST_CASE("deep copy uses the provided allocator")
+{
+    using counting_json = nlohmann::json::with_allocator_t<scratch_counting_allocator>;
+
+    // deeper than the 128 levels the copy constructor descends into, so the
+    // innermost objects are copied by the iterative deep copy
+    counting_json j = 1;
+    for (std::size_t i = 0; i < 300; ++i)
+    {
+        counting_json wrapper = counting_json::object();
+        wrapper["a"] = std::move(j);
+        j = std::move(wrapper);
+    }
+
+    scratch_pair_allocations = 0;
+    // NOLINTNEXTLINE(performance-unnecessary-copy-initialization): the copy is what is tested
+    const counting_json copy(j);
+    CHECK(scratch_pair_allocations > 0);
+    CHECK(copy == j);
+}
+
+namespace
+{
+// the number of constructions countdown_allocator lets happen, including the
+// one that fails; 0 means none ever fails
+std::size_t constructions_until_failure = 0;
+
+template<class T>
+struct countdown_allocator : std::allocator<T>
+{
+    using std::allocator<T>::allocator;
+
+    template<class U, class... Args>
+    void construct(U* p, Args&& ... args)
+    {
+        if (constructions_until_failure != 0)
+        {
+            --constructions_until_failure;
+            if (constructions_until_failure == 0)
+            {
+                throw std::bad_alloc();
+            }
+        }
+
+        ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+    }
+
+    template <class U>
+    struct rebind
+    {
+        using other = countdown_allocator<U>;
+    };
+};
+} // namespace
+
+TEST_CASE("converting a deeply nested value from another specialization fails cleanly (#5650)")
+{
+    // MSVC 2015's debug STL constructs the containers' debug proxies through
+    // the allocator in noexcept constructors, so a failing construction crashes
+    // the program there instead of throwing std::bad_alloc. Nothing to check.
+#if !(defined(_MSC_VER) && _MSC_VER < 1910 && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL > 0)
+    using countdown_json = nlohmann::json::with_allocator_t<countdown_allocator>;
+
+    // deeper than the 128 levels the converting constructor descends into, so
+    // that failures land on both sides of the bound - or, built with
+    // JSON_NO_THREAD_LOCAL, all in the iterative conversion
+    json j = {1, "two", {{"three", 3}}};
+    for (std::size_t i = 0; i < 150; ++i)
+    {
+        j = json{{"a", json::array({j, "sibling"})}};
+    }
+
+    // Fail every construction in turn. Each failure has to reach the caller,
+    // and everything built until then has to be destroyed cleanly.
+    std::size_t failures = 0;
+    for (std::size_t n = 1;; ++n)
+    {
+        constructions_until_failure = n;
+        try
+        {
+            const countdown_json converted = j;
+            constructions_until_failure = 0;
+            CHECK(converted.dump() == j.dump());
+            break;
+        }
+        catch (const std::bad_alloc&)
+        {
+            ++failures;
+        }
+    }
+    CHECK(failures > 0);
+#endif
 }
 
 namespace
@@ -226,7 +535,7 @@ struct allocator_no_forward : std::allocator<T>
 {
     allocator_no_forward() = default;
     template <class U>
-    allocator_no_forward(allocator_no_forward<U> /*unused*/) {}
+    allocator_no_forward(const allocator_no_forward<U>& /*unused*/) {}
 
     template <class U>
     struct rebind
@@ -247,17 +556,251 @@ TEST_CASE("bad my_allocator::construct")
 {
     SECTION("my_allocator::construct doesn't forward")
     {
-        using bad_alloc_json = nlohmann::basic_json<std::map,
-              std::vector,
-              std::string,
-              bool,
-              std::int64_t,
-              std::uint64_t,
-              double,
-              allocator_no_forward>;
+        using bad_alloc_json = nlohmann::json::with_allocator_t<allocator_no_forward>;
 
         bad_alloc_json j;
         j["test"] = bad_alloc_json::array_t();
         j["test"].push_back("should not leak");
     }
 }
+
+namespace
+{
+std::size_t counting_allocator_allocations = 0;
+std::size_t counting_allocator_deallocations = 0;
+
+template<class T>
+struct counting_allocator : std::allocator<T>
+{
+    using std::allocator<T>::allocator;
+
+    T* allocate(std::size_t n)
+    {
+        ++counting_allocator_allocations;
+        return std::allocator<T>::allocate(n);
+    }
+
+    void deallocate(T* p, std::size_t n)
+    {
+        ++counting_allocator_deallocations;
+        std::allocator<T>::deallocate(p, n);
+    }
+
+    template <class U>
+    struct rebind
+    {
+        using other = counting_allocator<U>;
+    };
+};
+} // namespace
+
+TEST_CASE("destructor performs no allocation, only deallocation")
+{
+    // see https://github.com/nlohmann/json/issues/4842 and
+    // https://github.com/nlohmann/json/issues/5135: destroying nested
+    // arrays/objects used to allocate a temporary stack (first with
+    // std::allocator, later - after #4842 - with the provided allocator).
+    // Since that stack could itself throw bad_alloc from inside the
+    // noexcept destructor (#5135), destroy() no longer allocates anything:
+    // it only ever frees what is already there.
+    using counting_json = nlohmann::json::with_allocator_t<counting_allocator>;
+
+    SECTION("array")
+    {
+        auto* j = new counting_json({1, {2, {3, 4}}, 5}); // NOLINT(cppcoreguidelines-owning-memory)
+        const auto allocations_before = counting_allocator_allocations;
+        const auto deallocations_before = counting_allocator_deallocations;
+        delete j; // NOLINT(cppcoreguidelines-owning-memory)
+        CHECK(counting_allocator_allocations == allocations_before);
+        CHECK(counting_allocator_deallocations > deallocations_before);
+    }
+
+    SECTION("object")
+    {
+        auto* j = new counting_json({{"a", {{"b", {1, 2}}}}, {"c", 3}}); // NOLINT(cppcoreguidelines-owning-memory)
+        const auto allocations_before = counting_allocator_allocations;
+        const auto deallocations_before = counting_allocator_deallocations;
+        delete j; // NOLINT(cppcoreguidelines-owning-memory)
+        CHECK(counting_allocator_allocations == allocations_before);
+        CHECK(counting_allocator_deallocations > deallocations_before);
+    }
+
+    SECTION("mixed tree of empty/non-empty arrays and objects")
+    {
+        auto* j = new counting_json( // NOLINT(cppcoreguidelines-owning-memory)
+        {
+            {"empty_obj", counting_json::object()},
+            {"empty_arr", counting_json::array()},
+            {"nested", {{"a", counting_json::array({1, 2, counting_json::object()})}, {"b", 3}}},
+            {"tail", counting_json::array({counting_json::array({1}), 2, counting_json::array({3})})}
+        });
+        const auto allocations_before = counting_allocator_allocations;
+        const auto deallocations_before = counting_allocator_deallocations;
+        delete j; // NOLINT(cppcoreguidelines-owning-memory)
+        CHECK(counting_allocator_allocations == allocations_before);
+        CHECK(counting_allocator_deallocations > deallocations_before);
+    }
+}
+
+// the no-exceptions CI job skips every CHECK_THROWS_AS, which would leave
+// next_construct_fails set for the next allocation outside a check
+#if !defined(JSON_NOEXCEPTION)
+TEST_CASE("a failed allocation leaves the value unchanged")
+{
+    // create JSON type using the throwing allocator
+    using my_json = nlohmann::json::with_allocator_t<my_allocator>;
+
+    // Each of these creates a string, array, object, or binary value. The
+    // value must be created before the type is changed: otherwise, a failed
+    // creation left a value of the new type without anything behind it (an
+    // assertion in its destructor, a null pointer everywhere else) or, when
+    // an old value was destroyed first, with a pointer to that destroyed one.
+
+    SECTION("creating a binary value")
+    {
+        const std::vector<std::uint8_t> bytes = {1, 2, 3};
+        my_json _;
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(_ = my_json::binary(bytes), std::bad_alloc&);
+        next_construct_fails = true;
+        CHECK_THROWS_AS(_ = my_json::binary(bytes, 42), std::bad_alloc&);
+        next_construct_fails = true;
+        CHECK_THROWS_AS(_ = my_json::binary(std::vector<std::uint8_t>(bytes)), std::bad_alloc&);
+        next_construct_fails = true;
+        CHECK_THROWS_AS(_ = my_json::binary(std::vector<std::uint8_t>(bytes), 42), std::bad_alloc&);
+        next_construct_fails = false;
+    }
+
+    SECTION("turning a null value into an array or object")
+    {
+        my_json j;
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j[0], std::bad_alloc&);
+        CHECK(j.is_null());
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j["key"], std::bad_alloc&);
+        CHECK(j.is_null());
+
+#ifdef JSON_HAS_CPP_17
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j[std::string_view("key")], std::bad_alloc&);
+        CHECK(j.is_null());
+#endif
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j.push_back(my_json(1)), std::bad_alloc&);
+        CHECK(j.is_null());
+
+        const my_json one = 1;
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j.push_back(one), std::bad_alloc&);
+        CHECK(j.is_null());
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j.push_back(my_json::object_t::value_type("key", 1)), std::bad_alloc&);
+        CHECK(j.is_null());
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j.emplace_back(1), std::bad_alloc&);
+        CHECK(j.is_null());
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j.emplace("key", 1), std::bad_alloc&);
+        CHECK(j.is_null());
+
+        const my_json object = {{"key", 1}};
+        next_construct_fails = true;
+        CHECK_THROWS_AS(j.update(object), std::bad_alloc&);
+        CHECK(j.is_null());
+
+        next_construct_fails = false;
+    }
+
+    // With iterator debugging, VS 2015's containers construct a proxy with the
+    // allocator in constructors that cannot report its failure, so a failing
+    // allocator crashes this section there (SIGSEGV with VS 2015 Debug x86).
+#if !(defined(_MSC_VER) && _MSC_VER < 1910 && defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL > 0)
+    SECTION("converting into an existing value")
+    {
+        // to_json replaces the value it is given; the old one must survive a
+        // failed creation of the new one
+        my_json j = "old";
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::string("new")), std::bad_alloc&);
+        CHECK(j == "old");
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::vector<int> {1, 2}), std::bad_alloc&);
+        CHECK(j == "old");
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::vector<bool> {true, false}), std::bad_alloc&);
+        CHECK(j == "old");
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::map<std::string, int> {{"a", 1}}), std::bad_alloc&);
+        CHECK(j == "old");
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, my_json::binary_t({1, 2})), std::bad_alloc&);
+        CHECK(j == "old");
+
+        // the overloads for lvalues of the value types, for the value types
+        // themselves, and for the remaining compatible types
+        const std::string string = "new";
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, string), std::bad_alloc&);
+        CHECK(j == "old");
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, "new"), std::bad_alloc&);
+        CHECK(j == "old");
+
+        // to_json only moves a binary value that it converted from another
+        // container type, which my_json's std::vector<std::uint8_t> is not
+        using binary_constructor = nlohmann::detail::external_constructor<nlohmann::detail::value_t::binary>;
+        next_construct_fails = true;
+        CHECK_THROWS_AS(binary_constructor::construct(j, my_json::binary_t({1, 2})), std::bad_alloc&);
+        CHECK(j == "old");
+
+        my_json::array_t array = {1, 2};
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, array), std::bad_alloc&);
+        CHECK(j == "old");
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::move(array)), std::bad_alloc&);
+        CHECK(j == "old");
+
+        my_json::object_t object = {{"a", 1}};
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, object), std::bad_alloc&);
+        CHECK(j == "old");
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::move(object)), std::bad_alloc&);
+        CHECK(j == "old");
+
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, std::valarray<int> {1, 2}), std::bad_alloc&);
+        CHECK(j == "old");
+
+#if JSON_HAS_RANGES && !defined(__MINGW32__)
+        const std::vector<int> numbers = {1, 2};
+        next_construct_fails = true;
+        CHECK_THROWS_AS(nlohmann::to_json(j, numbers | std::views::filter([](int /*unused*/)
+        {
+            return true;
+        })), std::bad_alloc&);
+        CHECK(j == "old");
+#endif
+
+        next_construct_fails = false;
+        nlohmann::to_json(j, std::vector<int> {1, 2});
+        CHECK(j == my_json({1, 2}));
+    }
+#endif
+}
+#endif

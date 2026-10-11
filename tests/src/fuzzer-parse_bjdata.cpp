@@ -10,16 +10,18 @@
 This file implements a parser test suitable for fuzz testing. Given a byte
 array data, it performs the following steps:
 
+- j0 = from_bjdata(data, allow_exceptions = false)
 - j1 = from_bjdata(data)
-- vec = to_bjdata(j1)
-- j2 = from_bjdata(vec)
-- assert(j1 == j2)
-- vec2 = to_bjdata(j1, use_size = true, use_type = false)
-- j3 = from_bjdata(vec2)
-- assert(j1 == j3)
-- vec3 = to_bjdata(j1, use_size = true, use_type = true)
-- j4 = from_bjdata(vec3)
-- assert(j1 == j4)
+- assert(j0 is discarded if parsing j1 fails, and j0 == j1 otherwise)
+- vec2 = to_bjdata(j1, use_size = false, use_type = false)
+- vec3 = to_bjdata(j1, use_size = true, use_type = false)
+- vec4 = to_bjdata(j1, use_size = true, use_type = true)
+- j2 = from_bjdata(vec2)
+- j3 = from_bjdata(vec3)
+- j4 = from_bjdata(vec4)
+- assert(from_bjdata(to_bjdata(j2, use_size = false, use_type = false)) is value-stable with j2)
+- assert(from_bjdata(to_bjdata(j3, use_size = true, use_type = false)) is value-stable with j3)
+- assert(from_bjdata(to_bjdata(j4, use_size = true, use_type = true)) is value-stable with j4)
 
 Re-serializing j2/j3/j4 with the same use_size/use_type settings is checked
 for value-stability rather than byte-exact stability: from_bjdata(to_bjdata(j2))
@@ -42,15 +44,14 @@ dump() serializes any non-finite double the same deterministic way (as JSON
 `null`, since JSON itself cannot represent NaN/Infinity), so comparing
 dumps is stable under exactly the same values that break operator==.
 
+The unit tests run the same checks on a fixed corpus (see the "BJData round-trip
+invariants" test case), so keep both in sync.
+
 The provided function `LLVMFuzzerTestOneInput` can be used in different fuzzer
 drivers.
 */
 
-#include <iostream>
-#include <sstream>
-#include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
+#include "fuzzer_common.hpp"
 
 // value-stable comparison for the round-trip checks below; see the note
 // above on why this compares dump()s rather than the json values directly
@@ -62,11 +63,23 @@ static bool is_value_stable(const json& lhs, const json& rhs)
 // see http://llvm.org/docs/LibFuzzer.html
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 {
+    std::vector<uint8_t> const vec1(data, data + size);
+
+    // step 0: parse input without exceptions
+    bool noexcept_threw = false;
+    json const j_noexcept = parse_without_exceptions([&] { return json::from_bjdata(vec1, true, false); }, noexcept_threw);
+    // whether step 1 succeeded; if not, the catch blocks below check that
+    // step 0 failed, too
+    bool parsed = false;
+
     try
     {
         // step 1: parse input
-        std::vector<uint8_t> const vec1(data, data + size);
         json const j1 = json::from_bjdata(vec1);
+        parsed = true;
+
+        // without exceptions, the same input must give the same value
+        assert(!noexcept_threw && !j_noexcept.is_discarded() && same_value(j_noexcept, j1));
 
         try
         {
@@ -100,14 +113,17 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     catch (const json::parse_error&)
     {
         // parse errors are ok, because input may be random bytes
+        assert(parsed || noexcept_threw || j_noexcept.is_discarded());
     }
     catch (const json::type_error&)
     {
         // type errors can occur during parsing, too
+        assert(parsed || noexcept_threw || j_noexcept.is_discarded());
     }
     catch (const json::out_of_range&)
     {
         // out of range errors may happen if provided sizes are excessive
+        assert(parsed || noexcept_threw || j_noexcept.is_discarded());
     }
 
     // return 0 - non-zero return values are reserved for future use

@@ -33,7 +33,8 @@ Summary:
 :   name of the type (class, struct) to serialize/deserialize
 
 `member` (in)
-:   name of the member variable to serialize/deserialize; up to 63 members can be given as a comma-separated list
+:   name of the member variable to serialize/deserialize; up to 63 members can be given as a comma-separated
+    list, which may also be empty
 
 ## Default definition
 
@@ -58,6 +59,20 @@ See the examples below for the concrete generated code.
 
 [GetNonDefNonCopy]: ../../features/arbitrary_types.md#how-can-i-use-get-for-non-default-constructiblenon-copyable-types
 
+!!! info "Types without members"
+
+    The member list may be empty. The macro then generates a `to_json` that produces an empty JSON object
+    `#!json {}`, and a `from_json` that reads no members:
+
+    ```cpp
+    struct marker
+    {
+        NLOHMANN_DEFINE_TYPE_INTRUSIVE(marker)
+    };
+    ```
+
+    The `WITH_NAMES` variants do not support this.
+
 !!! warning "Implementation limits"
 
     - The current implementation is limited to at most 63 member variables. If you want to serialize/deserialize types
@@ -68,7 +83,7 @@ See the examples below for the concrete generated code.
 
 ## Examples
 
-??? example "Example (1): NLOHMANN_DEFINE_TYPE_INTRUSIVE"
+??? example "Example: (1) NLOHMANN_DEFINE_TYPE_INTRUSIVE"
 
     Consider the following complete example:
 
@@ -97,7 +112,7 @@ See the examples below for the concrete generated code.
     --8<-- "examples/nlohmann_define_type_intrusive_explicit.cpp"
     ```
 
-??? example "Example (2): NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT"
+??? example "Example: (2) NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT"
 
     Consider the following complete example:
 
@@ -127,7 +142,7 @@ See the examples below for the concrete generated code.
 
     Note how a default-initialized `person` object is used in the `from_json` to fill missing values.
 
-??? example "Example (3): NLOHMANN_DEFINE_TYPE_INTRUSIVE_ONLY_SERIALIZE"
+??? example "Example: (3) NLOHMANN_DEFINE_TYPE_INTRUSIVE_ONLY_SERIALIZE"
     Consider the following complete example:
 
     ```cpp hl_lines="22"
@@ -171,3 +186,6 @@ See the examples below for the concrete generated code.
 1. Added in version 3.9.0.
 2. Added in version 3.11.0.
 3. Added in version 3.11.3.
+
+All three macros were changed to work with any `basic_json` specialization (not only `nlohmann::json`) in version 3.12.0,
+and to allow an empty member list in version 3.13.0.

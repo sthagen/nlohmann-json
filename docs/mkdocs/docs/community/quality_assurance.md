@@ -12,7 +12,7 @@ violations will result in a failed build.
 
 Note: C++20 modules support may hit compiler-specific issues not covered by the general compiler matrix below. See [Modules](../features/modules.md#known-issues) for known issues and workarounds.
 
-Note: Some modern features (like C++20 ranges or filesystem support) may be disabled on specific broken or incomplete toolchains even when standard feature-test macros indicate support. See [`JSON_HAS_RANGES`](../api/macros/json_has_ranges.md) and [`JSON_HAS_FILESYSTEM`](../api/macros/json_has_filesystem.md) for details on known exclusions.
+Note: Some modern features (like C++20 ranges or filesystem support) may be disabled on specific broken or incomplete toolchains even when standard feature-test macros indicate support. See [`JSON_HAS_RANGES`](../api/macros/json_has_ranges.md), [`JSON_HAS_RANGE_VIEW_CONVERSION`](../api/macros/json_has_range_view_conversion.md), and [`JSON_HAS_FILESYSTEM`](../api/macros/json_has_filesystem.md) for details on known exclusions.
 
 - [x] The library is compiled with 50+ different C++ compilers with different operating systems and platforms,
   including the oldest versions known to compile the library.
@@ -21,17 +21,18 @@ Note: Some modern features (like C++20 ranges or filesystem support) may be disa
       
         | Compiler                                     | Architecture | Operating System                  | CI        |
         |----------------------------------------------|--------------|-----------------------------------|-----------|
-        | AppleClang 15.0.0.15000040; Xcode 15.0.1     | arm64        | macOS 14.7.2 (Sonoma)             | GitHub    |
-        | AppleClang 15.0.0.15000100; Xcode 15.1       | arm64        | macOS 14.7.2 (Sonoma)             | GitHub    |
-        | AppleClang 15.0.0.15000100; Xcode 15.2       | arm64        | macOS 14.7.2 (Sonoma)             | GitHub    |
-        | AppleClang 15.0.0.15000309; Xcode 15.3       | arm64        | macOS 14.7.2 (Sonoma)             | GitHub    |
-        | AppleClang 15.0.0.15000309; Xcode 15.4       | arm64        | macOS 14.7.2 (Sonoma)             | GitHub    |
         | AppleClang 16.0.0.16000026; Xcode 16         | arm64        | macOS 15.2 (Sequoia)              | GitHub    |
         | AppleClang 16.0.0.16000026; Xcode 16.1       | arm64        | macOS 15.2 (Sequoia)              | GitHub    |
         | AppleClang 16.0.0.16000026; Xcode 16.2       | arm64        | macOS 15.2 (Sequoia)              | GitHub    |
         | AppleClang 17.0.0.17000013; Xcode 16.3       | arm64        | macOS 15.5 (Sequoia)              | GitHub    |
         | AppleClang 17.0.0.17000013; Xcode 16.4       | arm64        | macOS 15.5 (Sequoia)              | GitHub    |
         | AppleClang 17.0.0.17000319; Xcode 26.0.1     | arm64        | macOS 15.5 (Sequoia)              | GitHub    |
+        | AppleClang 17.0.0.17000404; Xcode 26.1.1     | arm64        | macOS 15.7.9 (Sequoia)            | GitHub    |
+        | AppleClang 17.0.0.17000603; Xcode 26.2       | arm64        | macOS 15.7.9 (Sequoia)            | GitHub    |
+        | AppleClang 17.0.0.17000604; Xcode 26.3       | arm64        | macOS 15.7.9 (Sequoia)            | GitHub    |
+        | AppleClang 21.0.0.21000099; Xcode 26.4.1     | arm64        | macOS 26.6.2 (Tahoe)              | GitHub    |
+        | AppleClang 21.0.0.21000101; Xcode 26.5       | arm64        | macOS 26.6.2 (Tahoe)              | GitHub    |
+        | AppleClang 21.0.0.21000101; Xcode 26.6       | arm64        | macOS 26.6.2 (Tahoe)              | GitHub    |
         | Clang 3.4.2                                  | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
         | Clang 3.5.2                                  | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
         | Clang 3.6.2                                  | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
@@ -89,8 +90,8 @@ Note: Some modern features (like C++20 ranges or filesystem support) may be disa
         | GNU 13.3.0                                   | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
         | GNU 14.2.0                                   | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
         | GNU 15.1.0                                   | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
-        | GNU 16.1.0                                   | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
-        | GNU 16.1.0                                   | arm64        | Linux 6.1.100                     | Cirrus CI |
+        | GNU 16.2.0                                   | x86_64       | Ubuntu 22.04.1 LTS                | GitHub    |
+        | GNU 16.1.0                                   | arm64        | Ubuntu 24.04                      | GitHub    |
         | icpc (ICC) 2021.10.0 20230609                | x86_64       | Ubuntu 22.04 LTS                  | GitHub    |
         | icpx (Intel oneAPI DPC++/C++) 2025.3.2       | x86_64       | Ubuntu 24.04 LTS                  | GitHub    |
         | nvc++ (NVIDIA HPC SDK) 25.5-0                | x86_64       | Ubuntu 22.04 LTS                  | GitHub    |
@@ -106,7 +107,7 @@ Note: Some modern features (like C++20 ranges or filesystem support) may be disa
 - [x] The library is compiled with all C++ language revisions (C++11, C++14, C++17, C++20, C++23, and C++26) to detect
   and fix language deprecations early.
 - [x] The library is checked for compiler warnings:
-  - On Clang, `-Weverything` is used with 8 exceptions.
+  - On Clang, `-Weverything` is used with 7 exceptions.
 
     ??? abstract "Clang warnings"
 
@@ -132,7 +133,8 @@ Note: Some modern features (like C++20 ranges or filesystem support) may be disa
   [libstdc++](https://gcc.gnu.org/onlinedocs/libstdc++/) to detect subtle differences or incompatibilities.
 - [x] The code checked with [Include What You Use (IWYU)](https://include-what-you-use.org) that all required standard
   headers are included.
-- [x] On Windows, the library is compiled with `<Windows.h>` being included to detect and avoid common bugs.
+- [x] On Windows, the library is compiled with `<Windows.h>` being included to detect and avoid common bugs (see
+  [`unit-windows_h.cpp`](https://github.com/nlohmann/json/blob/develop/tests/src/unit-windows_h.cpp)).
 - [x] The library is compiled with exceptions disabled to support alternative means of error handling.
 
 ## Stable public API
@@ -164,6 +166,9 @@ Note: Some modern features (like C++20 ranges or filesystem support) may be disa
 - [x] The parser is tested against extensive correctness suites for JSON compliance.
 - [x] In addition, the library is continuously fuzz-tested at [OSS-Fuzz](https://google.github.io/oss-fuzz/) where the
   library is checked against billions of inputs.
+- [x] Every crash reported by OSS-Fuzz is fixed together with a unit test that reproduces it, and the fix references
+  the OSS-Fuzz issue. The round-trip checks of the fuzzer drivers are also part of the unit tests. See the
+  [fuzz testing documentation](https://github.com/nlohmann/json/blob/develop/tests/fuzzing.md#handling-oss-fuzz-reports).
 
 ## Static analysis
 
@@ -196,6 +201,25 @@ Note: Some modern features (like C++20 ranges or filesystem support) may be disa
 - [x] The test suite is executed with [Valgrind](https://valgrind.org) (Memcheck) to detect memory leaks.
 - [x] The test suite is executed with [Sanitizers](https://github.com/google/sanitizers) (address sanitizer, undefined
   behavior sanitizer, integer overflow detection, nullability violations).
+
+## Dependencies
+
+!!! success "Requirement: No vulnerable dependencies"
+
+    The library has no dependencies besides the C++ standard library. The tools used to build, test, and document it
+    are kept free of known vulnerabilities.
+
+- [x] GitHub Actions are pinned to a commit hash, and the Python packages used by the documentation and the tools are
+  pinned to exact versions.
+- [x] [Dependabot](https://docs.github.com/en/code-security/dependabot) checks these dependencies daily and proposes
+  updates as pull requests.
+- [x] Every pull request is checked with the
+  [dependency review action](https://github.com/actions/dependency-review-action). A pull request that adds a
+  dependency with a known vulnerability of any severity fails this check and is not merged.
+- [x] Vulnerability alerts for dependencies are fixed or dismissed with a documented reason before the next release.
+  No release is made while such an alert is open.
+- [x] Third-party code included in the repository for testing, such as [doctest](https://github.com/doctest/doctest),
+  is updated manually.
 
 ## Style check
 

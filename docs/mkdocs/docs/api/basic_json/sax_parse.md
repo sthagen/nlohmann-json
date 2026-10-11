@@ -8,7 +8,8 @@ static bool sax_parse(InputType&& i,
                       input_format_t format = input_format_t::json,
                       const bool strict = true,
                       const bool ignore_comments = false,
-                      const bool ignore_trailing_commas = false);
+                      const bool ignore_trailing_commas = false,
+                      const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error);
 
 // (2)
 template<class IteratorType, class SAX, class SentinelType = IteratorType>
@@ -17,13 +18,14 @@ static bool sax_parse(IteratorType first, SentinelType last,
                       input_format_t format = input_format_t::json,
                       const bool strict = true,
                       const bool ignore_comments = false,
-                      const bool ignore_trailing_commas = false);
+                      const bool ignore_trailing_commas = false,
+                      const cbor_tag_handler_t tag_handler = cbor_tag_handler_t::error);
 ```
 
 Read from input and generate SAX events
 
 1. Read from a compatible input.
-2. Read from a pair of character iterators, or an iterator and a sentinel of a different type (C++20 ranges support)
+2. Read from a pair of character iterators, or an iterator and a sentinel of a different type (C++20 ranges support).
     
     The value_type of the iterator must be an integral type with a size of 1, 2, or 4 bytes, which will be interpreted
     respectively as UTF-8, UTF-16, and UTF-32. If `SentinelType` differs from `IteratorType`, it must be comparable to
@@ -65,11 +67,14 @@ The SAX event lister must follow the interface of [`json_sax`](../json_sax/index
 :   SAX event listener (must not be null)
 
 `format` (in)
-:    the format to parse (JSON, CBOR, MessagePack, or UBJSON) (optional, `input_format_t::json` by default), see
+:    the format to parse (JSON, BJData, BON8, BSON, CBOR, MessagePack, or UBJSON) (optional, `input_format_t::json` by
+     default), see
      [`input_format_t`](input_format_t.md) for more information
 
 `strict` (in)
-:   whether the input has to be consumed completely (optional, `#!cpp true` by default)
+:   whether the input has to be consumed completely (optional, `#!cpp true` by default); when `#!cpp false` and the
+    input is a `#!cpp std::istream`, the character that terminates a number is consumed unless
+    [`JSON_PRECISE_STREAM_POSITION`](../macros/json_precise_stream_position.md) is defined to `1`; see [`operator>>`](../operator_gtgt.md#notes)
 
 `ignore_comments` (in)
 :   whether comments should be ignored and treated like whitespace (`#!cpp true`) or yield a parse error
@@ -78,6 +83,10 @@ The SAX event lister must follow the interface of [`json_sax`](../json_sax/index
 `ignore_trailing_commas` (in)
 :   whether trailing commas in arrays or objects should be ignored and treated like whitespace (`#!cpp true`) or yield a parse error
     (`#!cpp false`); (optional, `#!cpp false` by default)
+
+`tag_handler` (in)
+:   how to handle CBOR tags; see [`cbor_tag_handler_t`](cbor_tag_handler_t.md). Ignored for formats other than CBOR
+    (optional, `cbor_tag_handler_t::error` by default).
 
 `first` (in)
 :   iterator to the start of a character range
@@ -134,11 +143,16 @@ A UTF-8 byte order mark is silently ignored.
 - Added in version 3.2.0.
 - Ignoring comments via `ignore_comments` added in version 3.9.0.
 - Added `ignore_trailing_commas` in version 3.13.0.
+- Added `tag_handler` in version 3.13.0.
 - Extended container support (1) to include types with lvalue-only ADL `begin`/`end` (matching `std::begin`/`std::end` semantics) in version 3.13.0.
 - Extended overload (2) to accept heterogeneous iterator+sentinel pairs (C++20 ranges support) in version 3.13.0.
+- `JSON_PRECISE_STREAM_POSITION` added in version 3.13.0 to optionally leave a `#!cpp std::istream` positioned right
+  after the parsed value when `strict` is `#!cpp false`.
 
 !!! warning "Deprecation"
 
     Overload (2) replaces calls to `sax_parse` with a pair of iterators as their first parameter which has been
     deprecated in version 3.8.0. This overload will be removed in version 4.0.0. Please replace all calls like
     `#!cpp sax_parse({ptr, ptr+len});` with `#!cpp sax_parse(ptr, ptr+len);`.
+
+    See the [migration guide](../../integration/migration_guide.md#parsing) for how to update existing code.
